@@ -13,6 +13,8 @@ export function register({ name, email, password }) {
   const state = db.get();
   email = String(email || '').trim().toLowerCase();
   if (!email || !password || !name) throw new Error('name, email and password are required');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('invalid email address');
+  if (String(password).length < 8) throw new Error('password must be at least 8 characters');
   if (state.users.find((u) => u.email === email)) throw new Error('an account with this email already exists');
   const salt = crypto.randomBytes(16).toString('hex');
   const user = { id: uid('user'), name, email, salt, passHash: hash(password, salt), createdAt: Date.now() };
@@ -21,16 +23,39 @@ export function register({ name, email, password }) {
   return user;
 }
 
+// Brute-force protection: 5 failures locks the account for 15 minutes.
+const attempts = new Map(); // email -> { count, lockedUntil }
+const MAX_FAILURES = 5;
+const LOCK_MS = 15 * 60 * 1000;
+
 export function verify({ email, password }) {
   const state = db.get();
   email = String(email || '').trim().toLowerCase();
+
+  const a = attempts.get(email);
+  if (a?.lockedUntil > Date.now()) {
+    const mins = Math.ceil((a.lockedUntil - Date.now()) / 60000);
+    throw new Error(`too many failed attempts — locked for ${mins} more minute(s)`);
+  }
+
   const user = state.users.find((u) => u.email === email);
-  if (!user) return null;
-  const candidate = hash(password || '', user.salt);
+  const candidate = hash(password || '', user?.salt || 'x');
   const ok =
+    Boolean(user) &&
     candidate.length === user.passHash.length &&
     crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(user.passHash));
-  return ok ? user : null;
+
+  if (!ok) {
+    const next = { count: (a?.count || 0) + 1, lockedUntil: 0 };
+    if (next.count >= MAX_FAILURES) {
+      next.lockedUntil = Date.now() + LOCK_MS;
+      next.count = 0;
+    }
+    attempts.set(email, next);
+    return null;
+  }
+  attempts.delete(email);
+  return user;
 }
 
 export function createSession(userId) {
@@ -75,7 +100,7 @@ export function currentUser(req) {
 }
 
 // Mounted at /api, so req.path here is relative to that prefix.
-const PUBLIC = new Set(['/register', '/login']);
+const PUBLIC = new Set(['/register', '/login', '/health']);
 
 export function authMiddleware(req, res, next) {
   if (PUBLIC.has(req.path)) return next();

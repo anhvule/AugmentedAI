@@ -7,6 +7,7 @@ import { getAgent } from './agents/index.js';
 import { buildPrompt } from './prompts.js';
 import { startMonitor, stopMonitor, touchActivity } from './monitor.js';
 import { verifyExecution, runTestCommands, diffText } from './verify.js';
+import { ensureWorkspace } from './workspace.js';
 
 export const PHASES = ['plan', 'execution', 'review', 'test_plan', 'test_results', 'summary'];
 const STATUS_AFTER = {
@@ -19,9 +20,18 @@ const STATUS_AFTER = {
 };
 
 const running = new Map(); // taskId -> { child, phase }
+const queue = []; // { taskId, phase, feedback }
+let activeRuns = 0;
+
+const maxConcurrent = () => Math.max(1, Number(db.get().settings.maxConcurrentRuns) || 2);
+const phaseTimeoutMs = () => Math.max(1, Number(db.get().settings.phaseTimeoutMinutes) || 30) * 60000;
 
 export function isRunning(taskId) {
   return running.has(taskId);
+}
+
+export function queueDepth() {
+  return { active: activeRuns, queued: queue.length, limit: maxConcurrent() };
 }
 
 export function ensurePhases(taskId) {
@@ -96,9 +106,52 @@ export async function startPhase(taskId, phase, { feedback = '' } = {}) {
   if (!t) throw new Error('task not found');
   if (running.has(taskId)) throw new Error('task already has a running phase');
   ensurePhases(taskId);
+  if (activeRuns >= maxConcurrent()) {
+    if (queue.some((q) => q.taskId === taskId)) return;
+    queue.push({ taskId, phase, feedback });
+    setPhase(taskId, phase, { status: 'queued' });
+    setTask(taskId, { runStatus: 'queued' });
+    log(taskId, `phase ${phase} queued (${activeRuns}/${maxConcurrent()} run slots busy)`);
+    return;
+  }
+  return runPhase(taskId, phase, feedback);
+}
+
+function drainQueue() {
+  while (activeRuns < maxConcurrent() && queue.length) {
+    const next = queue.shift();
+    const t = task(next.taskId);
+    if (!t || running.has(next.taskId)) continue;
+    if (phaseRecord(next.taskId, next.phase)?.status !== 'queued') continue;
+    log(next.taskId, `phase ${next.phase} dequeued — starting`);
+    runPhase(next.taskId, next.phase, next.feedback).catch((err) => log(next.taskId, err.message, 'error'));
+  }
+}
+
+async function runPhase(taskId, phase, feedback) {
+  activeRuns += 1;
+  try {
+    await executePhase(taskId, phase, feedback);
+  } finally {
+    activeRuns -= 1;
+    drainQueue();
+  }
+}
+
+async function executePhase(taskId, phase, feedback) {
+  const t = task(taskId);
   const proj = project(t.projectId);
   const agent = getAgent(proj.agent);
   const runId = uid('run');
+
+  // Isolated workspace: agents work in a per-task git worktree, never in the
+  // user's checkout. Falls back to the project path for non-git projects.
+  const ws = ensureWorkspace(proj, t);
+  if (ws.error) log(taskId, `workspace isolation unavailable (${ws.error}) — using project path`, 'warn');
+  if (ws.isolated && t.workspace !== ws.dir) {
+    setTask(taskId, { workspace: ws.dir, branch: ws.branch || t.branch });
+    log(taskId, `isolated workspace ready at ${ws.dir} on ${ws.branch}`);
+  }
 
   setPhase(taskId, phase, { status: 'running', startedAt: Date.now(), finishedAt: null, error: null });
   setTask(taskId, { currentPhase: phase, llmProcessId: runId, runStatus: 'running' });
@@ -107,6 +160,23 @@ export async function startPhase(taskId, phase, { feedback = '' } = {}) {
   const entry = { child: null, phase };
   running.set(taskId, entry);
   startMonitor(taskId);
+
+  // Watchdog: a hung agent must not hold a run slot forever.
+  const watchdog = setTimeout(() => {
+    if (running.get(taskId) !== entry) return;
+    running.delete(taskId);
+    stopMonitor(taskId);
+    if (entry.child && !entry.child.killed) {
+      try {
+        entry.child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    setPhase(taskId, phase, { status: 'failed', finishedAt: Date.now(), error: `timed out after ${Math.round(phaseTimeoutMs() / 60000)} minutes` });
+    setTask(taskId, { runStatus: 'idle', status: 'failed' });
+    log(taskId, `phase ${phase} killed by watchdog after ${Math.round(phaseTimeoutMs() / 60000)} minutes`, 'error');
+  }, phaseTimeoutMs());
 
   const runUsage = { input: 0, output: 0, costUsd: 0 };
   const onEvent = (ev) => {
@@ -126,7 +196,7 @@ export async function startPhase(taskId, phase, { feedback = '' } = {}) {
   };
   const registerChild = (child) => {
     entry.child = child;
-    touchActivity(taskId, { type: 'process', pid: child.pid, command: `${proj.agent} runner`, cwd: proj.repoPath });
+    touchActivity(taskId, { type: 'process', pid: child.pid, command: `${proj.agent} runner`, cwd: ws.dir });
   };
 
   const arts = artifacts(taskId);
@@ -137,7 +207,7 @@ export async function startPhase(taskId, phase, { feedback = '' } = {}) {
     result = await agent.run({
       phase,
       prompt: buildPrompt(phase, { task: t, project: proj, artifacts: arts, feedback, diff }),
-      cwd: proj.repoPath,
+      cwd: ws.dir,
       task: t,
       project: proj,
       attempt: t.attempts + 1,
@@ -149,7 +219,8 @@ export async function startPhase(taskId, phase, { feedback = '' } = {}) {
     result = { ok: false, text: err.message };
   }
 
-  if (running.get(taskId) !== entry) return; // stopped (or superseded) while awaiting
+  clearTimeout(watchdog);
+  if (running.get(taskId) !== entry) return; // stopped, timed out or superseded while awaiting
   running.delete(taskId);
   stopMonitor(taskId);
 
@@ -190,7 +261,7 @@ export async function startPhase(taskId, phase, { feedback = '' } = {}) {
   }
   if (phase === 'test_results') {
     const testPlan = artifacts(taskId).test_plan;
-    const harness = await runTestCommands(testPlan, proj.repoPath, artifacts(taskId).execution?.branch);
+    const harness = await runTestCommands(testPlan, ws.dir);
     if (harness) {
       result.json.agentClaimed = result.json.results || null;
       result.json.results = harness.results;
@@ -315,6 +386,14 @@ export function acceptPlan(taskId) {
 }
 
 export function stop(taskId) {
+  const queuedIdx = queue.findIndex((q) => q.taskId === taskId);
+  if (queuedIdx !== -1) {
+    const [q] = queue.splice(queuedIdx, 1);
+    setPhase(taskId, q.phase, { status: 'stopped' });
+    setTask(taskId, { runStatus: 'idle' });
+    log(taskId, `queued phase ${q.phase} cancelled by user`, 'warn');
+    return true;
+  }
   const entry = running.get(taskId);
   if (!entry) return false;
   running.delete(taskId);
@@ -329,5 +408,48 @@ export function stop(taskId) {
   setPhase(taskId, entry.phase, { status: 'stopped', finishedAt: Date.now() });
   setTask(taskId, { runStatus: 'idle' });
   log(taskId, `phase ${entry.phase} stopped by user`, 'warn');
+  drainQueue();
   return true;
+}
+
+// Called once at boot: phases left 'running'/'queued' by a crash or restart
+// are marked stopped so the UI reflects reality and reruns are possible.
+export function recoverInterrupted() {
+  const state = db.get();
+  let recovered = 0;
+  for (const p of state.phases) {
+    if (p.status === 'running' || p.status === 'queued') {
+      p.status = 'stopped';
+      p.error = 'interrupted by server restart';
+      recovered++;
+    }
+  }
+  for (const t of state.tasks) {
+    if (t.runStatus === 'running' || t.runStatus === 'queued') t.runStatus = 'idle';
+  }
+  if (recovered) db.save();
+  return recovered;
+}
+
+// Graceful shutdown: kill agent children so nothing keeps mutating
+// workspaces after the supervisor is gone.
+export function shutdown() {
+  for (const [taskId, entry] of running) {
+    if (entry.child && !entry.child.killed) {
+      try {
+        entry.child.kill('SIGTERM');
+      } catch {
+        /* already gone */
+      }
+    }
+    const rec = phaseRecord(taskId, entry.phase);
+    if (rec) {
+      rec.status = 'stopped';
+      rec.error = 'interrupted by shutdown';
+    }
+    const t = task(taskId);
+    if (t) t.runStatus = 'idle';
+  }
+  running.clear();
+  queue.length = 0;
 }

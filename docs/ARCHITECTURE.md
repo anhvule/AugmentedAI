@@ -531,3 +531,61 @@ Each seam was left where the next feature plugs in:
 
 The metric of a good architecture isn't that it predicted the future — it's
 that the future only has to touch one file at a time.
+
+---
+
+## 19. Iteration 4: production hardening (operating on real repos)
+
+The request "make it production ready for apps serving millions of users"
+has two readings, and distinguishing them **was** the architectural decision:
+(a) Deem itself as a multi-tenant SaaS with millions of users, or (b) Deem as
+an operator that can safely work *on* production codebases. We built (b) and
+documented the path to (a) (`docs/PRODUCTION.md`), because the risk that
+actually exists today is an agent damaging a real repository — not a million
+people running Deem.
+
+**Worktree isolation (`server/workspace.js`).** Every task runs in its own
+`git worktree` under `~/.deem/worktrees/<taskId>`, branched from the
+*explicit* configured base. The user's checkout is never mutated — no more
+`checkout -B` in their working copy (which the mock previously did!). This
+also fixed the §17 branch-stacking bug for free: branching from an explicit
+base rather than HEAD makes each task's diff exactly its own work. Worktrees
+over clones because they share the object store (cheap, instant) while
+having independent working trees and HEADs. Removal on archive; the branch
+survives for review.
+
+**Bounded concurrency + watchdog (workflow engine).** A run queue caps
+concurrent agent runs (`maxConcurrentRuns`, default 2; excess phases show as
+`queued`), and a per-phase watchdog SIGKILLs hung agents after
+`phaseTimeoutMinutes` (default 30). Both reuse the stale-owner identity
+check from §6 — a timed-out run that resolves later cannot overwrite newer
+state. Lesson: every external process you supervise needs *both* a
+concurrency bound and a deadline; either alone still lets one bad run starve
+the system.
+
+**Crash recovery + graceful shutdown.** On boot, phases left
+`running`/`queued` by a dead process are marked stopped ("interrupted by
+server restart") — state is data (§6), so recovery is a data fix-up, not a
+replay. On SIGINT/SIGTERM, agent children are killed and the debounced store
+is flushed synchronously (`db.flushSync`) — a 50 ms write debounce is
+harmless until the process exits inside the window.
+
+**Least privilege for agents.** Per-project `permissionMode`:
+`restricted` (default — file edits + dev toolchain only, via Claude
+`--allowedTools` / Codex workspace-write sandbox) vs `full` (the old
+skip-permissions behaviour, now opt-in). The default changed direction:
+dangerous is no longer the path of least resistance.
+
+**Abuse resistance + audit.** Login lockout (5 failures → 15 min, with a
+dummy-hash compare so unknown emails cost the same time as wrong passwords —
+no user enumeration via timing), password/email validation, absolute-path
+validation on repos, 0600 perms on the state file, and an append-only JSONL
+audit trail (`data/audit.log`, `GET /api/audit`) recording every
+consequential action with its actor. `GET /api/health` is the public
+monitoring probe.
+
+**What was deliberately NOT done.** No merge/push automation (the merge
+button stays human), no Postgres/queue rewrite (single-operator scale
+doesn't need it — the seams in §18 are where that lands), no container
+sandboxing of agents (worktree + tool allowlists first; containers are the
+next rung on that ladder).

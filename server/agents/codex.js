@@ -5,9 +5,13 @@ import { parseJsonLoose } from './index.js';
 export const codexAgent = {
   name: 'codex',
   run(job) {
-    const { prompt, cwd, onEvent, registerChild } = job;
+    const { prompt, cwd, onEvent, registerChild, project } = job;
     return new Promise((resolve) => {
-      const args = ['exec', '--json', '--skip-git-repo-check', prompt];
+      const sandbox =
+        (project?.permissionMode || 'restricted') === 'restricted'
+          ? '--full-auto' // workspace-write sandbox
+          : '--dangerously-bypass-approvals-and-sandbox';
+      const args = ['exec', '--json', '--skip-git-repo-check', sandbox, prompt];
       const child = spawn('codex', args, { cwd: cwd || process.cwd(), env: process.env });
       registerChild?.(child);
       let lastMessage = '';

@@ -8,20 +8,29 @@ const ProfileCtx = createContext(null);
 export const useProfile = () => useContext(ProfileCtx);
 
 function WorkspaceSettings({ onClose }) {
-  const [form, setForm] = useState({ telegramToken: '', defaultTokenBudget: 500000 });
+  const [form, setForm] = useState({ telegramToken: '', defaultTokenBudget: 500000, maxConcurrentRuns: 2, phaseTimeoutMinutes: 30 });
   const [current, setCurrent] = useState(null);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     api.get('/api/settings').then((s) => {
       setCurrent(s);
-      setForm((f) => ({ ...f, defaultTokenBudget: s.defaultTokenBudget }));
+      setForm((f) => ({
+        ...f,
+        defaultTokenBudget: s.defaultTokenBudget,
+        maxConcurrentRuns: s.maxConcurrentRuns ?? 2,
+        phaseTimeoutMinutes: s.phaseTimeoutMinutes ?? 30,
+      }));
     });
   }, []);
 
   const submit = async (e) => {
     e.preventDefault();
-    const patch = { defaultTokenBudget: Number(form.defaultTokenBudget) };
+    const patch = {
+      defaultTokenBudget: Number(form.defaultTokenBudget),
+      maxConcurrentRuns: Number(form.maxConcurrentRuns),
+      phaseTimeoutMinutes: Number(form.phaseTimeoutMinutes),
+    };
     if (form.telegramToken.trim()) patch.telegramToken = form.telegramToken.trim();
     await api.patch('/api/settings', patch);
     setSaved(true);
@@ -52,6 +61,20 @@ function WorkspaceSettings({ onClose }) {
             onChange={(e) => setForm({ ...form, defaultTokenBudget: e.target.value })} />
           <span className="hint">Runs stop retrying when a task exhausts its budget.</span>
         </label>
+        <div className="grid2">
+          <label className="field">
+            <span className="lab">Max concurrent runs</span>
+            <input className="text" type="number" min="1" max="8" value={form.maxConcurrentRuns}
+              onChange={(e) => setForm({ ...form, maxConcurrentRuns: e.target.value })} />
+            <span className="hint">Extra runs wait in a queue.</span>
+          </label>
+          <label className="field">
+            <span className="lab">Phase timeout (minutes)</span>
+            <input className="text" type="number" min="1" max="240" value={form.phaseTimeoutMinutes}
+              onChange={(e) => setForm({ ...form, phaseTimeoutMinutes: e.target.value })} />
+            <span className="hint">Hung agents are killed by the watchdog.</span>
+          </label>
+        </div>
         <div className="row">
           <button className="pill primary" type="submit">{saved ? 'Saved ✓' : 'Save settings'}</button>
           <button className="pill" type="button" onClick={onClose}>Close</button>

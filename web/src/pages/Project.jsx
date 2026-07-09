@@ -83,7 +83,7 @@ function SettingsModal({ project, onClose, onSaved, refresh }) {
   const [tab, setTab] = useState('general');
   const [form, setForm] = useState({
     name: project.name, description: project.description, repoPath: project.repoPath,
-    agent: project.agent, branch: project.branch,
+    agent: project.agent, branch: project.branch, permissionMode: project.permissionMode || 'restricted',
   });
   const [skill, setSkill] = useState({ name: '', instructions: '' });
   const [doc, setDoc] = useState({ title: '', content: '' });
@@ -144,6 +144,14 @@ function SettingsModal({ project, onClose, onSaved, refresh }) {
               <label className="field"><span className="lab">Default branch</span>
                 <input className="text" value={form.branch} onChange={set('branch')} /></label>
             </div>
+            <label className="field" style={{ maxWidth: 360 }}>
+              <span className="lab">Agent permissions</span>
+              <select className="text" value={form.permissionMode} onChange={set('permissionMode')}>
+                <option value="restricted">Restricted — file edits + dev toolchain only (recommended)</option>
+                <option value="full">Full access — agent may run any command</option>
+              </select>
+              <span className="hint">Applies to real agents. Tasks always run in an isolated git worktree, never your checkout.</span>
+            </label>
             <button className="pill primary" type="submit">Save settings</button>
           </form>
         )}

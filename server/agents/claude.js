@@ -13,11 +13,21 @@ function sessionFileFor(cwd, sessionId) {
 export const claudeAgent = {
   name: 'claude-code',
   run(job) {
-    const { prompt, cwd, onEvent, registerChild, readOnly } = job;
+    const { prompt, cwd, onEvent, registerChild, readOnly, project } = job;
     return new Promise((resolve) => {
       const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
-      if (readOnly) args.push('--allowedTools', 'Read,Grep,Glob,LS');
-      else args.push('--dangerously-skip-permissions');
+      if (readOnly) {
+        args.push('--allowedTools', 'Read,Grep,Glob,LS');
+      } else if ((project?.permissionMode || 'restricted') === 'restricted') {
+        // Production default: file edits + the dev toolchain, nothing else —
+        // no curl, no rm -rf outside git, no package publishing.
+        args.push(
+          '--allowedTools',
+          'Read,Grep,Glob,LS,Edit,Write,MultiEdit,Bash(git:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(yarn:*),Bash(pnpm:*)'
+        );
+      } else {
+        args.push('--dangerously-skip-permissions');
+      }
 
       const child = spawn('claude', args, { cwd: cwd || process.cwd(), env: process.env });
       registerChild?.(child);

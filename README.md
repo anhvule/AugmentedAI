@@ -34,6 +34,18 @@ Open http://localhost:4500, create an account (email + password), then:
 5. Every tab exports its artifact as Markdown (`Plan.md`, `Execution.md`,
    `Review.md`, …).
 
+## Production safety
+
+Deem is built to operate on repositories you actually ship from — see
+[docs/PRODUCTION.md](docs/PRODUCTION.md) for the operator's guide. In short:
+tasks run in **isolated git worktrees** (your checkout is never touched, and
+Deem never merges or pushes); agents run **least-privilege by default**
+(file edits + dev toolchain only); runs are bounded by a **concurrency
+queue**, a **watchdog timeout**, attempt and token budgets; crashes are
+recovered on boot; shutdown kills agent processes and flushes state; every
+consequential action lands in an **append-only audit log**; and
+`GET /api/health` exists for your monitoring.
+
 ## Ground truth over agent claims (anti-hallucination)
 
 An agent's report is treated as a hypothesis; only what the harness can

@@ -3,7 +3,7 @@ import React from 'react';
 const STATUS_COLOR = {
   pending: 'tan', planned: 'blue', implemented: 'blue', reviewed: 'blue',
   test_planned: 'blue', tested: 'green', done: 'green', failed: 'red', archived: 'gray',
-  running: 'blue', ready: 'tan', blocked: 'gray', stopped: 'red', idle: 'gray',
+  running: 'blue', ready: 'tan', blocked: 'gray', stopped: 'red', idle: 'gray', queued: 'tan',
   healthy: 'green', 'needs attention': 'red', approved: 'green', rejected: 'red',
 };
 

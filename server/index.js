@@ -4,7 +4,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db, uid } from './store.js';
 import { sseHandler, broadcast } from './events.js';
-import { PHASES, ensurePhases, startPhase, acceptPlan, stop, isRunning, phaseRecord, log, budgetExhausted } from './workflow.js';
+import {
+  PHASES, ensurePhases, startPhase, acceptPlan, stop, isRunning, phaseRecord, log,
+  budgetExhausted, queueDepth, recoverInterrupted, shutdown,
+} from './workflow.js';
+import { removeWorkspace } from './workspace.js';
+import { audit, auditTail } from './audit.js';
 import { exportMarkdown } from './exporters.js';
 import { AGENT_LABELS } from './agents/index.js';
 import { register, verify, createSession, destroySession, sessionCookie, clearCookie, authMiddleware } from './auth.js';
@@ -21,10 +26,16 @@ const findTask = (id) => state().tasks.find((t) => t.id === id);
 const findProject = (id) => state().projects.find((p) => p.id === id);
 const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email });
 
+// ---------- health (public, no secrets) ----------
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, uptimeSec: Math.floor(process.uptime()), runs: queueDepth() });
+});
+
 // ---------- auth ----------
 app.post('/api/register', (req, res) => {
   try {
     const user = register(req.body);
+    audit(user.email, 'auth.register');
     res.setHeader('Set-Cookie', sessionCookie(createSession(user.id)));
     res.json(publicUser(user));
   } catch (err) {
@@ -33,10 +44,19 @@ app.post('/api/register', (req, res) => {
 });
 
 app.post('/api/login', (req, res) => {
-  const user = verify(req.body);
-  if (!user) return res.status(401).json({ error: 'invalid email or password' });
-  res.setHeader('Set-Cookie', sessionCookie(createSession(user.id)));
-  res.json(publicUser(user));
+  try {
+    const user = verify(req.body);
+    if (!user) {
+      audit(req.body?.email, 'auth.login_failed');
+      return res.status(401).json({ error: 'invalid email or password' });
+    }
+    audit(user.email, 'auth.login');
+    res.setHeader('Set-Cookie', sessionCookie(createSession(user.id)));
+    res.json(publicUser(user));
+  } catch (err) {
+    audit(req.body?.email, 'auth.login_locked');
+    res.status(429).json({ error: err.message });
+  }
 });
 
 app.get('/api/profile', (req, res) => res.json(publicUser(req.user)));
@@ -49,8 +69,14 @@ app.post('/api/logout', (req, res) => {
 
 // ---------- workspace settings ----------
 app.get('/api/settings', (req, res) => {
-  const { telegramToken, defaultTokenBudget } = state().settings;
-  res.json({ telegramToken: telegramToken ? '••••' + telegramToken.slice(-4) : '', defaultTokenBudget, telegramConfigured: !!telegramToken });
+  const { telegramToken, defaultTokenBudget, maxConcurrentRuns, phaseTimeoutMinutes } = state().settings;
+  res.json({
+    telegramToken: telegramToken ? '••••' + telegramToken.slice(-4) : '',
+    defaultTokenBudget,
+    maxConcurrentRuns,
+    phaseTimeoutMinutes,
+    telegramConfigured: !!telegramToken,
+  });
 });
 
 app.patch('/api/settings', (req, res) => {
@@ -61,15 +87,22 @@ app.patch('/api/settings', (req, res) => {
     syncTelegram();
   }
   if ('defaultTokenBudget' in req.body) s.defaultTokenBudget = Math.max(1000, Number(req.body.defaultTokenBudget) || 500000);
+  if ('maxConcurrentRuns' in req.body) s.maxConcurrentRuns = Math.min(8, Math.max(1, Number(req.body.maxConcurrentRuns) || 2));
+  if ('phaseTimeoutMinutes' in req.body) s.phaseTimeoutMinutes = Math.min(240, Math.max(1, Number(req.body.phaseTimeoutMinutes) || 30));
   db.save();
+  audit(req.user.email, 'settings.update', { keys: Object.keys(req.body) });
   res.json({ ok: true });
 });
+
+// ---------- audit trail ----------
+app.get('/api/audit', (req, res) => res.json(auditTail(Number(req.query.lines) || 200)));
 
 // ---------- chat control ----------
 app.get('/api/chat', (req, res) => res.json(state().chats.slice(-100)));
 app.post('/api/chat', (req, res) => {
   const reply = handleChatMessage(req.body.message);
   recordExchange('web', req.body.message, reply);
+  audit(req.user.email, 'chat.command', { message: String(req.body.message || '').slice(0, 200) });
   res.json({ reply });
 });
 
@@ -86,22 +119,25 @@ app.get('/api/projects', (req, res) => {
 });
 
 app.post('/api/projects', (req, res) => {
-  const { name, description, repoPath, agent = 'mock', branch = 'main' } = req.body;
-  if (!name) return res.status(400).json({ error: 'name is required' });
-  const healthy = repoPath && fs.existsSync(repoPath);
+  const { name, description, repoPath, agent = 'mock', branch = 'main', permissionMode = 'restricted' } = req.body;
+  if (!name || String(name).length > 120) return res.status(400).json({ error: 'name is required (max 120 chars)' });
+  if (!repoPath || !path.isAbsolute(repoPath)) return res.status(400).json({ error: 'repoPath must be an absolute path' });
+  const healthy = fs.existsSync(repoPath);
   const proj = {
     id: uid('proj'),
     name,
     description: description || 'New Deem project ready for local execution.',
-    repoPath: repoPath || '',
+    repoPath,
     agent,
     provider: agent === 'codex' ? 'openai' : agent === 'claude-code' ? 'anthropic' : 'deem',
     branch,
+    permissionMode: permissionMode === 'full' ? 'full' : 'restricted',
     health: healthy ? 'healthy' : 'needs attention',
     createdAt: Date.now(),
   };
   state().projects.push(proj);
   db.save();
+  audit(req.user.email, 'project.create', { projectId: proj.id, repoPath, agent });
   broadcast('projects', {});
   res.json(proj);
 });
@@ -109,15 +145,18 @@ app.post('/api/projects', (req, res) => {
 app.patch('/api/projects/:id', (req, res) => {
   const proj = findProject(req.params.id);
   if (!proj) return res.status(404).json({ error: 'not found' });
-  const { name, description, repoPath, agent, branch } = req.body;
+  const { name, description, repoPath, agent, branch, permissionMode } = req.body;
+  if (repoPath !== undefined && !path.isAbsolute(repoPath)) return res.status(400).json({ error: 'repoPath must be an absolute path' });
   Object.assign(proj, {
     ...(name && { name }),
     ...(description !== undefined && { description }),
     ...(repoPath !== undefined && { repoPath, health: fs.existsSync(repoPath) ? 'healthy' : 'needs attention' }),
     ...(agent && { agent, provider: agent === 'codex' ? 'openai' : agent === 'claude-code' ? 'anthropic' : 'deem' }),
     ...(branch && { branch }),
+    ...(permissionMode && { permissionMode: permissionMode === 'full' ? 'full' : 'restricted' }),
   });
   db.save();
+  audit(req.user.email, 'project.update', { projectId: proj.id });
   broadcast('projects', {});
   res.json(proj);
 });
@@ -206,8 +245,14 @@ app.patch('/api/tasks/:id', (req, res) => {
   for (const k of allowed) if (k in req.body) t[k] = req.body[k];
   if ('autoRun' in req.body) t.autoRun = { ...t.autoRun, ...req.body.autoRun };
   if ('budget' in req.body) t.budget = { ...t.budget, ...req.body.budget };
+  if (req.body.status === 'archived') {
+    // Closing a task retires its isolated worktree; the branch survives in the repo.
+    const removed = removeWorkspace(findProject(t.projectId), t.id);
+    if (removed) log(t.id, 'isolated workspace removed (task archived)');
+  }
   t.updatedAt = Date.now();
   db.save();
+  audit(req.user.email, 'task.update', { taskId: t.id, keys: Object.keys(req.body) });
   broadcast('task', { taskId: t.id, patch: t });
   res.json(t);
 });
@@ -219,11 +264,13 @@ app.post('/api/tasks/:id/run', async (req, res) => {
   if (budgetExhausted(t)) return res.status(400).json({ error: `token budget exhausted (${t.usage.totalTokens}/${t.budget.tokens})` });
   const phase = req.body.phase || t.currentPhase || 'plan';
   if (phase === 'execution' && !t.planAccepted) return res.status(400).json({ error: 'plan must be accepted first' });
+  audit(req.user.email, 'task.run', { taskId: t.id, phase });
   startPhase(t.id, phase).catch((err) => log(t.id, `run failed: ${err.message}`, 'error'));
   res.json({ ok: true, phase });
 });
 
 app.post('/api/tasks/:id/stop', (req, res) => {
+  audit(req.user.email, 'task.stop', { taskId: req.params.id });
   res.json({ stopped: stop(req.params.id) });
 });
 
@@ -321,6 +368,27 @@ if (fs.existsSync(dist)) {
   app.get(/^(?!\/api).*/, (req, res) => res.sendFile(path.join(dist, 'index.html')));
 }
 
+// Crash recovery: phases left running by a previous process are unwound
+// before we accept new work.
+const recovered = recoverInterrupted();
+if (recovered) console.log(`[recovery] marked ${recovered} interrupted phase(s) as stopped`);
+
 const PORT = process.env.DEEM_PORT || 4501;
 app.listen(PORT, () => console.log(`Deem server listening on http://localhost:${PORT}`));
 syncTelegram();
+audit('system', 'server.start', { recovered });
+
+// Graceful shutdown: kill agent children, record state, flush the store.
+let shuttingDown = false;
+function shutdownAndExit(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} received — stopping agents and flushing state`);
+  shutdown();
+  audit('system', 'server.stop', { signal });
+  db.flushSync();
+  process.exit(0);
+}
+process.on('SIGINT', () => shutdownAndExit('SIGINT'));
+process.on('SIGTERM', () => shutdownAndExit('SIGTERM'));
+process.on('exit', () => db.flushSync());

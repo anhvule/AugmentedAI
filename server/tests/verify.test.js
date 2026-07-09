@@ -52,7 +52,7 @@ test('harness runs test commands and judges by exit code', async () => {
     ],
     manualCases: [{ title: 'human check' }],
   };
-  const r = await runTestCommands(plan, dir, null, { timeoutMs: 10000 });
+  const r = await runTestCommands(plan, dir, { timeoutMs: 10000 });
   assert.equal(r.results.find((x) => x.title === 'passes').status, 'passed');
   assert.equal(r.results.find((x) => x.title === 'fails').status, 'failed');
   assert.equal(r.results.find((x) => x.title === 'human check').status, 'manual');

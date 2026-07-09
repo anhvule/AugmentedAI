@@ -17,7 +17,13 @@ const EMPTY = {
   logs: [],
   activity: {},
   chats: [],
-  settings: { telegramToken: '', telegramOffset: 0, defaultTokenBudget: 500000 },
+  settings: {
+    telegramToken: '',
+    telegramOffset: 0,
+    defaultTokenBudget: 500000,
+    maxConcurrentRuns: 2,
+    phaseTimeoutMinutes: 30,
+  },
 };
 
 let state = null;
@@ -34,20 +40,40 @@ function load() {
   return state;
 }
 
+function writeNow() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const tmp = DATA_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, DATA_FILE);
+  try {
+    fs.chmodSync(DATA_FILE, 0o600); // contains session tokens and bot tokens
+  } catch {
+    /* best effort */
+  }
+}
+
 function persist() {
   if (writeTimer) return;
   writeTimer = setTimeout(() => {
     writeTimer = null;
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    const tmp = DATA_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-    fs.renameSync(tmp, DATA_FILE);
+    writeNow();
   }, 50);
+}
+
+// Flush pending debounced writes immediately — called on shutdown so a
+// SIGTERM inside the 50ms window cannot lose state.
+function flushSync() {
+  if (writeTimer) {
+    clearTimeout(writeTimer);
+    writeTimer = null;
+  }
+  if (state) writeNow();
 }
 
 export const db = {
   get: load,
   save: persist,
+  flushSync,
 };
 
 export function uid(prefix) {

@@ -95,14 +95,15 @@ function buildPlan(task) {
   };
 }
 
-function execute(task, project, attempt, onEvent) {
-  const cwd = project.repoPath;
-  const branch = `task/${taskSlug(task)}`;
+function execute(task, project, attempt, onEvent, cwd) {
+  // cwd is the task's isolated worktree (already on the task branch); the
+  // user's checkout is never touched.
   const filesChanged = [];
+  let branch = `task/${taskSlug(task)}`;
   let repoNote = 'Project path is not a git repository — changes recorded as artifacts only.';
 
   if (cwd && fs.existsSync(path.join(cwd, '.git'))) {
-    git(cwd, 'checkout', '-B', branch);
+    branch = git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD').out || branch;
     const artifactDir = path.join(cwd, '.deem');
     fs.mkdirSync(artifactDir, { recursive: true });
     const file = path.join(artifactDir, `${task.id}.md`);
@@ -161,7 +162,7 @@ export const mockAgent = {
           'exec_command', 'search_code', 'exec_command', 'get_code_snippet',
           'exec_command', 'trace_path', 'exec_command', 'exec_command',
         ], seed);
-        const { branch, filesChanged, repoNote } = execute(task, project, attempt, onEvent);
+        const { branch, filesChanged, repoNote } = execute(task, project, attempt, onEvent, job.cwd || project.repoPath);
         const s = scores(EXEC_CRITERIA, seed, attempt > 1 ? 9 : 8);
         return {
           ok: true,

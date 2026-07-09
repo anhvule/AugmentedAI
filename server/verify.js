@@ -89,9 +89,10 @@ function execCommand(command, cwd, timeoutMs) {
   });
 }
 
-// Execute the test plan's auto cases ourselves. The agent may write tests,
-// but pass/fail comes from real exit codes.
-export async function runTestCommands(testPlan, cwd, branch, { timeoutMs = 120000 } = {}) {
+// Execute the test plan's auto cases ourselves — inside the task's isolated
+// workspace, never the user's checkout. The agent may write tests, but
+// pass/fail comes from real exit codes.
+export async function runTestCommands(testPlan, cwd, { timeoutMs = 120000 } = {}) {
   if (!testPlan) return null;
   if (!cwd || !fs.existsSync(cwd)) {
     return {
@@ -99,7 +100,6 @@ export async function runTestCommands(testPlan, cwd, branch, { timeoutMs = 12000
       summary: 'Project path missing — automated cases could not run.',
     };
   }
-  if (branch && isGitRepo(cwd)) git(cwd, 'checkout', branch);
 
   const results = [];
   for (const c of testPlan.autoCases || []) {
