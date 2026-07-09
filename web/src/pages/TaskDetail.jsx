@@ -382,6 +382,23 @@ export default function TaskDetail() {
                   <p className="meta" style={{ marginTop: 8 }}>Scores will appear after implementation runs.</p>
                 )}
               </div>
+              <div className="card" style={{ marginTop: 14 }}>
+                <div className="row between">
+                  <Kicker>Token budget</Kicker>
+                  <span className="badge gray">${(task.usage?.costUsd ?? 0).toFixed(2)}</span>
+                </div>
+                <div className="bar" style={{ marginTop: 10 }}>
+                  <i style={{
+                    width: `${Math.min(100, ((task.usage?.totalTokens || 0) / (task.budget?.tokens || 1)) * 100)}%`,
+                    background: (task.usage?.totalTokens || 0) >= (task.budget?.tokens || Infinity) ? '#a03325' : undefined,
+                  }} />
+                </div>
+                <div className="meta">
+                  <b>{(task.usage?.totalTokens || 0).toLocaleString()}</b> / {(task.budget?.tokens || 0).toLocaleString()} tokens
+                  {' '}({(task.usage?.inputTokens || 0).toLocaleString()} in / {(task.usage?.outputTokens || 0).toLocaleString()} out).
+                  Retries stop when the budget is exhausted.
+                </div>
+              </div>
               {autoRunPanel('execution', 'Auto Run Execution', 'Start implementation automatically after the plan is accepted.')}
               {autoRunPanel('review', 'Auto Run Review', 'Start the independent review automatically after implementation is accepted.')}
               {autoRunPanel('tests', 'Auto Run Tests', 'Generate the test plan, run tests and produce the summary automatically after review approval.')}
@@ -443,6 +460,9 @@ export default function TaskDetail() {
               <div><div className="k">Branch</div><div className="v"><code>{task.branch}</code></div></div>
               <div><div className="k">Current phase</div><div className="v">{task.currentPhase}</div></div>
               <div><div className="k">Attempts</div><div className="v">{task.attempts} / {task.maxAttempts}</div></div>
+              <div><div className="k">Tokens used</div><div className="v">{(task.usage?.totalTokens || 0).toLocaleString()}</div></div>
+              <div><div className="k">Cost</div><div className="v">${(task.usage?.costUsd ?? 0).toFixed(4)}</div></div>
+              <div><div className="k">Token budget</div><div className="v">{(task.budget?.tokens || 0).toLocaleString()}</div></div>
               <div style={{ gridColumn: '1 / -1' }}><div className="k">Updated</div><div className="v">{fmtDate(task.updatedAt)}</div></div>
             </div>
           </div>

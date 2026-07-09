@@ -35,12 +35,16 @@ function taskSlug(task) {
   return task.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
 }
 
-async function emitTools(onEvent, tools) {
+async function emitTools(onEvent, tools, seed = 'usage') {
   for (const name of tools) {
     onEvent({ type: 'tool', name });
     onEvent({ type: 'log', message: `tool ${name}` });
     await sleep(DELAY / tools.length);
   }
+  const rand = rng(seed);
+  const input = 2000 + Math.floor(rand() * 3000) * tools.length;
+  const output = 400 + Math.floor(rand() * 900) * tools.length;
+  onEvent({ type: 'usage', input, output, costUsd: (input * 3 + output * 15) / 1e6 });
 }
 
 function requirementList(task) {
@@ -149,14 +153,14 @@ export const mockAgent = {
 
     switch (phase) {
       case 'plan': {
-        await emitTools(onEvent, ['list_projects', 'search_code', 'get_code_snippet', 'search_graph']);
+        await emitTools(onEvent, ['list_projects', 'search_code', 'get_code_snippet', 'search_graph'], seed);
         return { ok: true, json: buildPlan(task) };
       }
       case 'execution': {
         await emitTools(onEvent, [
           'exec_command', 'search_code', 'exec_command', 'get_code_snippet',
           'exec_command', 'trace_path', 'exec_command', 'exec_command',
-        ]);
+        ], seed);
         const { branch, filesChanged, repoNote } = execute(task, project, attempt, onEvent);
         const s = scores(EXEC_CRITERIA, seed, attempt > 1 ? 9 : 8);
         return {
@@ -174,7 +178,7 @@ export const mockAgent = {
         };
       }
       case 'review': {
-        await emitTools(onEvent, ['get_code_snippet', 'search_code', 'trace_path']);
+        await emitTools(onEvent, ['get_code_snippet', 'search_code', 'trace_path'], seed);
         const s = scores(REVIEW_CRITERIA, seed, attempt > 1 ? 8 : 7);
         const total = Object.values(s).reduce((a, b) => a + b, 0);
         return {
@@ -195,7 +199,7 @@ export const mockAgent = {
         };
       }
       case 'test_plan': {
-        await emitTools(onEvent, ['search_code', 'exec_command']);
+        await emitTools(onEvent, ['search_code', 'exec_command'], seed);
         return {
           ok: true,
           json: {
@@ -223,7 +227,7 @@ export const mockAgent = {
         };
       }
       case 'test_results': {
-        await emitTools(onEvent, ['exec_command', 'exec_command']);
+        await emitTools(onEvent, ['exec_command', 'exec_command'], seed);
         return {
           ok: true,
           json: {
@@ -237,7 +241,7 @@ export const mockAgent = {
         };
       }
       case 'summary': {
-        await emitTools(onEvent, ['search_graph']);
+        await emitTools(onEvent, ['search_graph'], seed);
         return {
           ok: true,
           json: {

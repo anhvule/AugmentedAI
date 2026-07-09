@@ -29,6 +29,10 @@ export const codexAgent = {
           }
           const item = ev.item || ev.msg || ev;
           const t = item?.type || ev.type || '';
+          if (t === 'token_count') {
+            const u = item.info?.total_token_usage || item.info?.last_token_usage || {};
+            onEvent({ type: 'usage', input: u.input_tokens || 0, output: u.output_tokens || 0, costUsd: 0, absolute: true });
+          }
           if (/session|thread/.test(t) && (item.session_id || item.thread_id)) {
             onEvent({ type: 'session', sessionId: item.session_id || item.thread_id, sessionFile: null });
           } else if (/command|tool|exec/.test(t)) {

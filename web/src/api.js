@@ -15,6 +15,7 @@ export const api = {
   get: (url) => req('GET', url),
   post: (url, body = {}) => req('POST', url, body),
   patch: (url, body) => req('PATCH', url, body),
+  del: (url) => req('DELETE', url),
 };
 
 let source = null;
@@ -23,7 +24,7 @@ const listeners = new Set();
 function ensureSource() {
   if (source) return;
   source = new EventSource('/api/events');
-  for (const type of ['task', 'phase', 'log', 'activity', 'projects']) {
+  for (const type of ['task', 'phase', 'log', 'activity', 'projects', 'chat']) {
     source.addEventListener(type, (e) => {
       const payload = JSON.parse(e.data);
       for (const fn of listeners) fn(type, payload);

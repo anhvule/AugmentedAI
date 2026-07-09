@@ -9,11 +9,15 @@ const DATA_FILE = path.join(DATA_DIR, 'deem.json');
 
 const EMPTY = {
   profile: null,
+  users: [],
+  sessions: [],
   projects: [],
   tasks: [],
   phases: [],
   logs: [],
   activity: {},
+  chats: [],
+  settings: { telegramToken: '', telegramOffset: 0, defaultTokenBudget: 500000 },
 };
 
 let state = null;
@@ -22,7 +26,8 @@ let writeTimer = null;
 function load() {
   if (state) return state;
   try {
-    state = { ...EMPTY, ...JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) };
+    const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    state = { ...structuredClone(EMPTY), ...raw, settings: { ...EMPTY.settings, ...(raw.settings || {}) } };
   } catch {
     state = structuredClone(EMPTY);
   }

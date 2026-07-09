@@ -79,11 +79,14 @@ function NewTaskModal({ projectId, onClose, onCreated }) {
   );
 }
 
-function SettingsModal({ project, onClose, onSaved }) {
+function SettingsModal({ project, onClose, onSaved, refresh }) {
+  const [tab, setTab] = useState('general');
   const [form, setForm] = useState({
     name: project.name, description: project.description, repoPath: project.repoPath,
     agent: project.agent, branch: project.branch,
   });
+  const [skill, setSkill] = useState({ name: '', instructions: '' });
+  const [doc, setDoc] = useState({ title: '', content: '' });
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
 
   const submit = async (e) => {
@@ -91,32 +94,118 @@ function SettingsModal({ project, onClose, onSaved }) {
     onSaved(await api.patch(`/api/projects/${project.id}`, form));
   };
 
+  const addSkill = async (e) => {
+    e.preventDefault();
+    if (!skill.name.trim()) return;
+    await api.post(`/api/projects/${project.id}/skills`, skill);
+    setSkill({ name: '', instructions: '' });
+    refresh();
+  };
+
+  const addDoc = async (e) => {
+    e.preventDefault();
+    if (!doc.title.trim() || !doc.content.trim()) return;
+    await api.post(`/api/projects/${project.id}/knowledge`, doc);
+    setDoc({ title: '', content: '' });
+    refresh();
+  };
+
   return (
     <div className="overlay" onClick={onClose}>
-      <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
-        <Kicker>Project settings</Kicker>
-        <h2>Update settings</h2>
-        <label className="field"><span className="lab">Name</span>
-          <input className="text" value={form.name} onChange={set('name')} /></label>
-        <label className="field"><span className="lab">Description</span>
-          <input className="text" value={form.description} onChange={set('description')} /></label>
-        <label className="field"><span className="lab">Local repository path</span>
-          <input className="text" value={form.repoPath} onChange={set('repoPath')} /></label>
-        <div className="grid2">
-          <label className="field"><span className="lab">Agent</span>
-            <select className="text" value={form.agent} onChange={set('agent')}>
-              <option value="mock">Mock runner (no API cost)</option>
-              <option value="claude-code">Claude Code</option>
-              <option value="codex">Codex</option>
-            </select></label>
-          <label className="field"><span className="lab">Default branch</span>
-            <input className="text" value={form.branch} onChange={set('branch')} /></label>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="row between">
+          <div>
+            <Kicker>Project settings</Kicker>
+            <h2>Update settings</h2>
+          </div>
+          <button className="pill" onClick={onClose}>Close</button>
         </div>
-        <div className="row">
-          <button className="pill primary" type="submit">Save settings</button>
-          <button className="pill" type="button" onClick={onClose}>Cancel</button>
+        <div className="tabs">
+          {[['general', 'General'], ['skills', `Skills (${project.skills?.length || 0})`], ['knowledge', `Knowledge (${project.knowledge?.length || 0})`]].map(([key, label]) => (
+            <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>
+          ))}
         </div>
-      </form>
+
+        {tab === 'general' && (
+          <form onSubmit={submit}>
+            <label className="field"><span className="lab">Name</span>
+              <input className="text" value={form.name} onChange={set('name')} /></label>
+            <label className="field"><span className="lab">Description</span>
+              <input className="text" value={form.description} onChange={set('description')} /></label>
+            <label className="field"><span className="lab">Local repository path</span>
+              <input className="text" value={form.repoPath} onChange={set('repoPath')} /></label>
+            <div className="grid2">
+              <label className="field"><span className="lab">Agent</span>
+                <select className="text" value={form.agent} onChange={set('agent')}>
+                  <option value="mock">Mock runner (no API cost)</option>
+                  <option value="claude-code">Claude Code</option>
+                  <option value="codex">Codex</option>
+                </select></label>
+              <label className="field"><span className="lab">Default branch</span>
+                <input className="text" value={form.branch} onChange={set('branch')} /></label>
+            </div>
+            <button className="pill primary" type="submit">Save settings</button>
+          </form>
+        )}
+
+        {tab === 'skills' && (
+          <div>
+            <p className="lead">Standing instructions injected into every phase prompt — coding standards, conventions, guardrails.</p>
+            {(project.skills || []).map((s) => (
+              <div className="card inner" key={s.id} style={{ marginBottom: 10 }}>
+                <div className="row between">
+                  <h3 style={{ margin: 0 }}>{s.name}</h3>
+                  <span className="row">
+                    <label className="row" style={{ fontSize: 13, fontWeight: 700 }}>
+                      <input type="checkbox" checked={s.enabled !== false}
+                        onChange={(e) => api.patch(`/api/projects/${project.id}/skills/${s.id}`, { enabled: e.target.checked }).then(refresh)} />
+                      enabled
+                    </label>
+                    <button className="pill small" onClick={() => api.del(`/api/projects/${project.id}/skills/${s.id}`).then(refresh)}>Delete</button>
+                  </span>
+                </div>
+                <p className="meta" style={{ whiteSpace: 'pre-wrap' }}>{s.instructions}</p>
+              </div>
+            ))}
+            <form onSubmit={addSkill} className="card inner">
+              <Kicker>Add skill</Kicker>
+              <label className="field"><span className="lab">Name</span>
+                <input className="text" value={skill.name} onChange={(e) => setSkill({ ...skill, name: e.target.value })} placeholder="TypeScript conventions" /></label>
+              <label className="field"><span className="lab">Instructions</span>
+                <textarea className="text" value={skill.instructions} onChange={(e) => setSkill({ ...skill, instructions: e.target.value })}
+                  placeholder="Always use strict TypeScript. Prefer functional components. Never commit console.log." /></label>
+              <button className="pill primary" type="submit">Add skill</button>
+            </form>
+          </div>
+        )}
+
+        {tab === 'knowledge' && (
+          <div>
+            <p className="lead">Project knowledge base (RAG) — the most relevant chunks are retrieved per task and injected into the agent's prompts.</p>
+            {(project.knowledge || []).map((d) => (
+              <div className="card inner" key={d.id} style={{ marginBottom: 10 }}>
+                <div className="row between">
+                  <h3 style={{ margin: 0 }}>{d.title}</h3>
+                  <span className="row">
+                    <span className="meta">{(d.content || '').length.toLocaleString()} chars</span>
+                    <button className="pill small" onClick={() => api.del(`/api/projects/${project.id}/knowledge/${d.id}`).then(refresh)}>Delete</button>
+                  </span>
+                </div>
+                <p className="meta">{(d.content || '').slice(0, 180)}…</p>
+              </div>
+            ))}
+            <form onSubmit={addDoc} className="card inner">
+              <Kicker>Add knowledge</Kicker>
+              <label className="field"><span className="lab">Title</span>
+                <input className="text" value={doc.title} onChange={(e) => setDoc({ ...doc, title: e.target.value })} placeholder="Architecture notes / API contract / domain glossary" /></label>
+              <label className="field"><span className="lab">Content</span>
+                <textarea className="text" style={{ minHeight: 140 }} value={doc.content} onChange={(e) => setDoc({ ...doc, content: e.target.value })}
+                  placeholder="Paste docs, notes, specs — anything the agent should know about this project." /></label>
+              <button className="pill primary" type="submit">Add to knowledge base</button>
+            </form>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -201,7 +290,8 @@ export default function Project() {
         />
       )}
       {settings && (
-        <SettingsModal project={proj} onClose={() => setSettings(false)} onSaved={() => { setSettings(false); refresh(); }} />
+        <SettingsModal project={proj} onClose={() => setSettings(false)} refresh={refresh}
+          onSaved={() => { setSettings(false); refresh(); }} />
       )}
     </div>
   );

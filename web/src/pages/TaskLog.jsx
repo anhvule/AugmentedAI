@@ -74,6 +74,7 @@ export default function TaskLog() {
             <div><div className="k">Transcript lines</div><div className="v">{a.transcriptLines}</div></div>
             <div><div className="k">Total tool calls</div><div className="v">{a.totalToolCalls}</div></div>
             <div><div className="k">Last tool</div><div className="v"><code>{a.lastTool || '—'}</code></div></div>
+            <div><div className="k">Tokens used</div><div className="v">{(task.usage?.totalTokens || 0).toLocaleString()} (${(task.usage?.costUsd ?? 0).toFixed(4)})</div></div>
             <div><div className="k">Session file</div><div className="v" style={{ fontSize: 12 }}>{a.sessionFile || '—'}</div></div>
           </div>
           <div>

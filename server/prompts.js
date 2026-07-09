@@ -1,5 +1,7 @@
 // Structured prompts per pipeline phase. Every prompt demands a strict JSON
 // artifact so quality is systematic, not dependent on prose parsing.
+import { contextSections } from './rag.js';
+
 function taskContext(task, project) {
   return [
     `Project: ${project.name} (local repo at ${project.repoPath}, default branch ${project.branch || 'main'})`,
@@ -16,7 +18,7 @@ function taskContext(task, project) {
 const JSON_ONLY = 'Respond with ONLY a JSON object matching the schema — no markdown fences, no prose outside JSON.';
 
 export function buildPrompt(phase, { task, project, artifacts = {}, feedback = '' }) {
-  const ctx = taskContext(task, project);
+  const ctx = taskContext(task, project) + contextSections(project, task);
   switch (phase) {
     case 'plan':
       return `You are the planning phase of an engineering pipeline.\n${ctx}\n

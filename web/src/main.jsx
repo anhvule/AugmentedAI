@@ -7,6 +7,7 @@ import Home from './pages/Home.jsx';
 import Project from './pages/Project.jsx';
 import TaskDetail from './pages/TaskDetail.jsx';
 import TaskLog from './pages/TaskLog.jsx';
+import Chat from './pages/Chat.jsx';
 
 const router = createBrowserRouter([
   {
@@ -17,6 +18,7 @@ const router = createBrowserRouter([
       { path: 'projects/:projectId', element: <Project /> },
       { path: 'tasks/:taskId', element: <TaskDetail /> },
       { path: 'tasks/:taskId/log', element: <TaskLog /> },
+      { path: 'chat', element: <Chat /> },
     ],
   },
 ]);

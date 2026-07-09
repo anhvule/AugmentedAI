@@ -2,12 +2,19 @@ import React, { useState } from 'react';
 import { api } from '../api.js';
 
 export default function Login({ onLogin }) {
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
+  const [mode, setMode] = useState('login');
+  const [form, setForm] = useState({ name: '', email: '', password: '' });
+  const [err, setErr] = useState('');
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
 
   const submit = async (e) => {
     e.preventDefault();
-    onLogin(await api.post('/api/profile', { name, email }));
+    setErr('');
+    try {
+      onLogin(await api.post(mode === 'login' ? '/api/login' : '/api/register', form));
+    } catch (ex) {
+      setErr(ex.message);
+    }
   };
 
   return (
@@ -19,16 +26,27 @@ export default function Login({ onLogin }) {
           Describe a task in plain English. Deem plans, implements, reviews, tests and reports —
           with consistent quality, on every run.
         </p>
+        <div className="row" style={{ marginBottom: 4 }}>
+          <button className={`pill small ${mode === 'login' ? 'primary' : ''}`} onClick={() => setMode('login')}>Sign in</button>
+          <button className={`pill small ${mode === 'register' ? 'primary' : ''}`} onClick={() => setMode('register')}>Create account</button>
+        </div>
         <form onSubmit={submit}>
-          <label className="field">
-            <span className="lab">Name</span>
-            <input className="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Aiko Sato" required />
-          </label>
+          {mode === 'register' && (
+            <label className="field">
+              <span className="lab">Name</span>
+              <input className="text" value={form.name} onChange={set('name')} placeholder="Aiko Sato" required />
+            </label>
+          )}
           <label className="field">
             <span className="lab">Email</span>
-            <input className="text" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="aiko@example.com" required />
+            <input className="text" type="email" value={form.email} onChange={set('email')} placeholder="aiko@example.com" required />
           </label>
-          <button className="pill primary" type="submit">Enter workspace</button>
+          <label className="field">
+            <span className="lab">Password</span>
+            <input className="text" type="password" value={form.password} onChange={set('password')} required minLength={4} />
+          </label>
+          {err && <p style={{ color: '#a03325' }}>{err}</p>}
+          <button className="pill primary" type="submit">{mode === 'login' ? 'Sign in' : 'Create account & enter'}</button>
         </form>
       </div>
     </div>

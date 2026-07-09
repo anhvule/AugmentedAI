@@ -115,7 +115,26 @@ work).
   sessionFile, tools {name: count}, process {pid, cpu, rss, elapsed, idle,
   command, cwd} }
 
-## Non-goals (this iteration)
+## Iteration 2 (same day): "build everything"
 
-- Real auth / multi-user; chat-app control; Electron packaging; RAG/skills
-  management UI; token metering beyond attempt budgets.
+All former non-goals were implemented:
+
+- **Auth** (`server/auth.js`): users with scrypt password hashes, cookie
+  sessions (30-day TTL), auth middleware over the whole API.
+- **Token metering**: adapters emit `usage` events (mock synthesizes
+  deterministic counts; claude parses result usage/cost; codex reads
+  `token_count`); the workflow accumulates per-task usage and fails retries
+  when the token budget is exhausted. Default budget in workspace settings.
+- **Skills + Knowledge/RAG** (`server/rag.js`): per-project skills (standing
+  instructions) and knowledge entries (1200-char chunks, keyword-overlap
+  scoring, top-3 injected into every phase prompt). Managed from the project
+  settings modal (General / Skills / Knowledge tabs).
+- **Chat control** (`server/chat.js`): deterministic command engine (status /
+  projects / tasks / new task / run / stop / report) shared by the in-app
+  Command Center page and the Telegram long-poll bridge
+  (`server/telegram.js`, dormant until a bot token is saved in settings).
+- **Electron shell** (`electron/main.cjs`): boots the API in-process and
+  opens the app window; `npm run app`.
+
+Remaining future ideas: installers (electron-builder), embedding-based
+retrieval, roles/permissions, more chat platforms.

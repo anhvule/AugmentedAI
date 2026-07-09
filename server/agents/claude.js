@@ -51,6 +51,13 @@ export const claudeAgent = {
             }
           } else if (ev.type === 'result') {
             resultText = ev.result || '';
+            const u = ev.usage || {};
+            onEvent({
+              type: 'usage',
+              input: (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0),
+              output: u.output_tokens || 0,
+              costUsd: ev.total_cost_usd || 0,
+            });
           }
         }
       });

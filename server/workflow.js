@@ -107,7 +107,22 @@ export async function startPhase(taskId, phase, { feedback = '' } = {}) {
   running.set(taskId, entry);
   startMonitor(taskId);
 
-  const onEvent = (ev) => touchActivity(taskId, ev);
+  const runUsage = { input: 0, output: 0, costUsd: 0 };
+  const onEvent = (ev) => {
+    if (ev.type === 'usage') {
+      if (ev.absolute) {
+        runUsage.input = ev.input;
+        runUsage.output = ev.output;
+        runUsage.costUsd = ev.costUsd || runUsage.costUsd;
+      } else {
+        runUsage.input += ev.input || 0;
+        runUsage.output += ev.output || 0;
+        runUsage.costUsd += ev.costUsd || 0;
+      }
+      return;
+    }
+    touchActivity(taskId, ev);
+  };
   const registerChild = (child) => {
     entry.child = child;
     touchActivity(taskId, { type: 'process', pid: child.pid, command: `${proj.agent} runner`, cwd: proj.repoPath });
@@ -134,7 +149,16 @@ export async function startPhase(taskId, phase, { feedback = '' } = {}) {
   running.delete(taskId);
   stopMonitor(taskId);
 
-  setTask(taskId, { runStatus: 'idle' });
+  const prevUsage = task(taskId).usage || { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+  const usage = {
+    inputTokens: prevUsage.inputTokens + runUsage.input,
+    outputTokens: prevUsage.outputTokens + runUsage.output,
+    costUsd: +(prevUsage.costUsd + runUsage.costUsd).toFixed(4),
+  };
+  usage.totalTokens = usage.inputTokens + usage.outputTokens;
+  setTask(taskId, { runStatus: 'idle', usage });
+  if (runUsage.input + runUsage.output > 0)
+    log(taskId, `usage: +${runUsage.input + runUsage.output} tokens this run (${usage.totalTokens} total, $${usage.costUsd})`);
 
   if (!result.ok || !result.json) {
     setPhase(taskId, phase, { status: 'failed', finishedAt: Date.now(), error: result.text || 'no artifact produced' });
@@ -180,12 +204,19 @@ async function afterPhase(taskId, phase, artifact) {
   advance(taskId, phase);
 }
 
+export function budgetExhausted(t) {
+  return t.budget?.tokens && (t.usage?.totalTokens || 0) >= t.budget.tokens;
+}
+
 function retryOrFail(taskId, feedback) {
   const t = task(taskId);
-  if (t.attempts >= t.maxAttempts) {
+  if (t.attempts >= t.maxAttempts || budgetExhausted(t)) {
+    const reason = budgetExhausted(t)
+      ? `token budget exhausted (${t.usage.totalTokens}/${t.budget.tokens})`
+      : `attempt budget exhausted (${t.attempts}/${t.maxAttempts})`;
     setTask(taskId, { status: 'failed' });
-    setPhase(taskId, 'execution', { status: 'failed', error: 'attempt budget exhausted' });
-    log(taskId, `attempt budget exhausted (${t.attempts}/${t.maxAttempts}) — task failed`, 'error');
+    setPhase(taskId, 'execution', { status: 'failed', error: reason });
+    log(taskId, `${reason} — task failed`, 'error');
     return;
   }
   if (!t.autoRun.execution) {

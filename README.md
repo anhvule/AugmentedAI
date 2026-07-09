@@ -13,9 +13,10 @@ dashboard reference (see [docs/specs](docs/specs/2026-07-09-deem-design.md)).
 ```bash
 npm install
 npm run dev        # web on http://localhost:4500, API on :4501
+npm run app        # or: build + launch as an Electron desktop app
 ```
 
-Open http://localhost:4500, enter a name/email, then:
+Open http://localhost:4500, create an account (email + password), then:
 
 1. **Add New Project** — point it at any local git repository and pick an
    agent (Mock runner works with zero setup and zero API cost).
@@ -29,6 +30,25 @@ Open http://localhost:4500, enter a name/email, then:
    transcript.
 5. Every tab exports its artifact as Markdown (`Plan.md`, `Execution.md`,
    `Review.md`, …).
+
+## Beyond the pipeline
+
+- **Command Center & Telegram** — drive everything from chat: `status`,
+  `projects`, `tasks <project>`, `new task in <project>: <name> | <desc> |
+  <req1; req2>`, `run/stop/report <task>`. The in-app Command Center works out
+  of the box; paste a @BotFather token in **Settings** and the same commands
+  work from Telegram.
+- **Skills & Knowledge (RAG)** — per project (Update settings → Skills /
+  Knowledge): skills are standing instructions injected into every phase
+  prompt; knowledge entries are chunked and the top-scoring chunks for each
+  task are retrieved into the agent's context.
+- **Token budgets** — every run's usage is metered (tokens + cost) per task;
+  auto-retry stops when the attempt budget *or* token budget is exhausted.
+  Default budget is configurable in Settings.
+- **Multi-user auth** — scrypt-hashed passwords, cookie sessions, per-user
+  accounts sharing the workspace.
+- **Desktop app** — `npm run app` boots the API inside Electron and opens
+  Deem as a native window.
 
 ## Agents
 
@@ -57,7 +77,8 @@ server/   Express API + SSE
 `npm test` runs the agent-determinism test suite. `npm run build` +
 `npm start` serves the built UI from the API server as a single process.
 
-## Not yet implemented (future)
+## Future ideas
 
-Chat-app remote control, Electron packaging, RAG/skills management UI,
-token-level budget metering, multi-user auth.
+Distributable installers (electron-builder), vector-embedding retrieval for
+the knowledge base, per-user permissions/roles, more chat platforms (Slack,
+Discord) on the shared command engine.
