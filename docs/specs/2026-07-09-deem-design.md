@@ -138,3 +138,28 @@ All former non-goals were implemented:
 
 Remaining future ideas: installers (electron-builder), embedding-based
 retrieval, roles/permissions, more chat platforms.
+
+## Iteration 3: ground-truth verification (anti-hallucination)
+
+Principle: agent claims are hypotheses; only harness-observable artifacts
+(git diffs, exit codes, processes) are facts. Implemented in
+`server/verify.js` + workflow gates:
+
+- `verifyExecution`: after every execution run, the harness resolves the task
+  branch and computes the diff vs the project base branch. It overwrites the
+  agent's `filesChanged`/`branch` with git truth and attaches a
+  `verification` record. Checked-but-unverified (no branch / empty diff) →
+  automatic rejection → retry with explicit feedback, regardless of
+  self-reported scores.
+- `runTestCommands`: the harness executes every auto case's commands
+  (bash, 120 s timeout, output captured); exit codes decide pass/fail and
+  overwrite the agent's claimed results (`harnessRun: true`,
+  `agentClaimed` retained). Any failure routes back through `retryOrFail`.
+- Review grounding: the review prompt embeds the real `git diff` (7 kB cap)
+  and demands an `evidence` array citing file + observation for every claim;
+  uncited claims are to be omitted. UI shows Evidence card; empty evidence
+  is flagged as suspicious.
+- All phase prompts carry an anti-invention clause (`write "unknown", never
+  fabricate; claims are cross-checked`).
+- Known mock quirk: stacked task branches mean the diff vs main can include
+  earlier tasks' artifact files; real agents branch from the base.

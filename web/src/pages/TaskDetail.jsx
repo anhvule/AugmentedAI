@@ -194,6 +194,23 @@ export default function TaskDetail() {
                     <List items={art('execution').filesChanged} empty="No files recorded." />
                     {art('execution').branch && <div className="meta">Branch: <code>{art('execution').branch}</code></div>}
                   </div>
+                  {art('execution').verification && (
+                    <div className="card inner" style={{ marginTop: 14 }}>
+                      <div className="row between">
+                        <Kicker>Harness verification</Kicker>
+                        <StatusBadge status={
+                          !art('execution').verification.checked ? 'blocked'
+                            : art('execution').verification.verified ? 'done' : 'failed'
+                        }>
+                          {!art('execution').verification.checked ? 'SKIPPED'
+                            : art('execution').verification.verified ? 'VERIFIED' : 'FAILED'}
+                        </StatusBadge>
+                      </div>
+                      <p className="meta" style={{ marginTop: 8 }}>
+                        Ground truth from git — not the agent's self-report: {art('execution').verification.note}.
+                      </p>
+                    </div>
+                  )}
                 </>
               )}
             </Section>
@@ -235,6 +252,12 @@ export default function TaskDetail() {
                     <div className="row between"><Kicker>Issues</Kicker>
                       <span className="badge gray">{art('review').issues?.length || 0}</span></div>
                     <List items={art('review').issues} empty="No issues raised." />
+                  </div>
+                  <div className="card inner" style={{ marginTop: 14 }}>
+                    <div className="row between"><Kicker>Evidence cited</Kicker>
+                      <span className="badge gray">{art('review').evidence?.length || 0}</span></div>
+                    <List items={art('review').evidence} empty="No evidence cited — treat this review with suspicion." />
+                    <div className="meta">The reviewer judges the real git diff; uncited claims are discounted.</div>
                   </div>
                 </>
               )}
@@ -306,12 +329,19 @@ export default function TaskDetail() {
               {!art('test_results') && <div className="empty">No test results yet.</div>}
               {art('test_results') && (
                 <>
+                  {art('test_results').harnessRun && (
+                    <div className="meta" style={{ marginTop: 12 }}>
+                      <span className="badge green">Run by harness</span>{' '}
+                      Verdicts come from real command exit codes, not agent claims.
+                    </div>
+                  )}
                   {art('test_results').results?.map((r, i) => (
                     <div className="card inner" style={{ marginTop: 14 }} key={i}>
                       <div className="row between">
                         <h3 style={{ margin: 0 }}>{r.title}</h3>
-                        <StatusBadge status={r.status === 'passed' ? 'done' : 'failed'}>{r.status}</StatusBadge>
+                        <StatusBadge status={r.status === 'passed' ? 'done' : r.status === 'manual' ? 'pending' : 'failed'}>{r.status}</StatusBadge>
                       </div>
+                      {r.command && <div className="meta" style={{ marginTop: 6 }}><code>{r.command}</code></div>}
                       {r.output && <pre className="code" style={{ marginTop: 10 }}>{r.output}</pre>}
                     </div>
                   ))}

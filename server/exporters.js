@@ -41,7 +41,10 @@ export function exportMarkdown(kind, { task, project, phases, activity }) {
         `## Deviations from plan\n${list(ex.deviations)}\n\n## Files changed\n${list(ex.filesChanged, '- `') .replace(/- `(.*)/g, '- `$1`')}\n\n` +
         `## Evaluation (${Object.values(crit).reduce((a, b) => a + b, 0)}/60)\n` +
         list(Object.entries(crit).map(([k, v]) => `${k}: ${v}/10`)) +
-        `\n\n${ex.evaluation?.notes || ''}`
+        `\n\n${ex.evaluation?.notes || ''}` +
+        (ex.verification
+          ? `\n\n## Harness verification\n${ex.verification.checked ? (ex.verification.verified ? '✅ VERIFIED' : '❌ FAILED') : '⚠️ SKIPPED'} — ${ex.verification.note}`
+          : '')
       );
     }
     case 'review': {
@@ -49,7 +52,8 @@ export function exportMarkdown(kind, { task, project, phases, activity }) {
       return (
         head('Review') +
         `## Verdict: ${rv.verdict || 'n/a'} (${Object.values(rv.scores || {}).reduce((a, b) => a + b, 0)}/60)\n${rv.summary || ''}\n\n` +
-        `## Strengths\n${list(rv.strengths)}\n\n## Issues\n${list(rv.issues)}\n\n## Scores\n` +
+        `## Strengths\n${list(rv.strengths)}\n\n## Issues\n${list(rv.issues)}\n\n` +
+        `## Evidence cited\n${list(rv.evidence)}\n\n## Scores\n` +
         list(Object.entries(rv.scores || {}).map(([k, v]) => `${k}: ${v}/10`))
       );
     }

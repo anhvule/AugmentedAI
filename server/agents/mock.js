@@ -194,6 +194,10 @@ export const mockAgent = {
               'Consistent naming and structure with the surrounding codebase',
             ],
             issues: total >= 54 ? [] : ['No automated visual regression evidence attached; add a screenshot or test'],
+            evidence: [
+              `.deem/${task.id}.md: artifact commits the requirements checklist for this task`,
+              'task branch diff: files changed match the execution report',
+            ],
             scores: s,
           },
         };

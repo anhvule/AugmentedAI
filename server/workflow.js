@@ -6,6 +6,7 @@ import { broadcast } from './events.js';
 import { getAgent } from './agents/index.js';
 import { buildPrompt } from './prompts.js';
 import { startMonitor, stopMonitor, touchActivity } from './monitor.js';
+import { verifyExecution, runTestCommands, diffText } from './verify.js';
 
 export const PHASES = ['plan', 'execution', 'review', 'test_plan', 'test_results', 'summary'];
 const STATUS_AFTER = {
@@ -128,11 +129,14 @@ export async function startPhase(taskId, phase, { feedback = '' } = {}) {
     touchActivity(taskId, { type: 'process', pid: child.pid, command: `${proj.agent} runner`, cwd: proj.repoPath });
   };
 
+  const arts = artifacts(taskId);
+  const diff = phase === 'review' ? diffText(proj, arts.execution?.verification?.branch || arts.execution?.branch) : '';
+
   let result;
   try {
     result = await agent.run({
       phase,
-      prompt: buildPrompt(phase, { task: t, project: proj, artifacts: artifacts(taskId), feedback }),
+      prompt: buildPrompt(phase, { task: t, project: proj, artifacts: arts, feedback, diff }),
       cwd: proj.repoPath,
       task: t,
       project: proj,
@@ -167,6 +171,35 @@ export async function startPhase(taskId, phase, { feedback = '' } = {}) {
     return;
   }
 
+  // Ground-truth post-processing: overwrite agent claims with what the
+  // harness can actually observe.
+  if (phase === 'execution') {
+    const v = verifyExecution(t, proj, result.json);
+    result.json.verification = v;
+    if (v.checked) {
+      result.json.filesChanged = v.files; // git is the source of truth
+      result.json.branch = v.branch;
+      log(
+        taskId,
+        v.verified ? `harness verification: ${v.note}` : `harness verification FAILED: ${v.note}`,
+        v.verified ? 'info' : 'warn'
+      );
+    } else {
+      log(taskId, `harness verification skipped: ${v.note}`, 'warn');
+    }
+  }
+  if (phase === 'test_results') {
+    const testPlan = artifacts(taskId).test_plan;
+    const harness = await runTestCommands(testPlan, proj.repoPath, artifacts(taskId).execution?.branch);
+    if (harness) {
+      result.json.agentClaimed = result.json.results || null;
+      result.json.results = harness.results;
+      result.json.summary = harness.summary;
+      result.json.harnessRun = true;
+      log(taskId, `harness executed test plan: ${harness.summary}`);
+    }
+  }
+
   setPhase(taskId, phase, { status: 'done', finishedAt: Date.now(), data: result.json });
   log(taskId, `phase ${phase} completed`);
   await afterPhase(taskId, phase, result.json);
@@ -177,6 +210,15 @@ async function afterPhase(taskId, phase, artifact) {
 
   if (phase === 'execution') {
     setTask(taskId, { attempts: t.attempts + 1 });
+    // Harness gate first: self-reported scores cannot outvote a missing diff.
+    const v = artifact.verification;
+    if (v?.checked && !v.verified) {
+      log(taskId, `rejecting execution: harness found no real changes (${v.note})`, 'warn');
+      return retryOrFail(
+        taskId,
+        `Harness verification failed: ${v.note}. You must commit real file changes on the task branch — reporting work without a diff is rejected automatically.`
+      );
+    }
     const total = evalTotal(artifact.evaluation?.criteria);
     const threshold = t.acceptance?.threshold ?? 42;
     if (total < threshold) {
@@ -184,6 +226,17 @@ async function afterPhase(taskId, phase, artifact) {
       return retryOrFail(taskId, `Evaluation scored ${total}/60 (< ${threshold}). Notes: ${artifact.evaluation?.notes || ''}`);
     }
     log(taskId, `implementation evaluation ${total}/60 — accepted`);
+  }
+
+  if (phase === 'test_results') {
+    const failed = (artifact.results || []).filter((r) => r.status === 'failed');
+    if (failed.length) {
+      log(taskId, `${failed.length} automated test(s) failed — sending back to implementation`, 'warn');
+      return retryOrFail(
+        taskId,
+        `Automated tests failed (run by the harness):\n${failed.map((f) => `- ${f.title}: ${f.output?.slice(0, 300)}`).join('\n')}`
+      );
+    }
   }
 
   if (phase === 'review' && artifact.verdict !== 'approved') {

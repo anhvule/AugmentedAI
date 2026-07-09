@@ -31,6 +31,28 @@ Open http://localhost:4500, create an account (email + password), then:
 5. Every tab exports its artifact as Markdown (`Plan.md`, `Execution.md`,
    `Review.md`, …).
 
+## Ground truth over agent claims (anti-hallucination)
+
+An agent's report is treated as a hypothesis; only what the harness can
+observe counts as fact:
+
+- **Execution is verified from git** — after every implementation run, Deem
+  computes the real diff on the task branch. `filesChanged` comes from
+  `git diff`, never from the agent. No commits / empty diff → automatic
+  rejection and retry, regardless of self-reported scores.
+- **Tests are run by the harness** — the agent may write tests, but every
+  auto case's commands are executed by Deem itself; pass/fail comes from
+  exit codes. Failing tests send the task back to implementation.
+- **The reviewer reads the actual diff** — the review prompt embeds the git
+  diff as ground truth and requires cited evidence (`file: what was
+  observed`) for every claim; the Evidence card shows the citations.
+- **Prompts forbid invention** — every phase prompt instructs the agent to
+  write `unknown` rather than fabricate, and warns that claims are
+  cross-checked.
+- **Acceptance is layered** — a task proceeds only if harness verification,
+  the rubric threshold, the independent review verdict, and harness-run
+  tests all pass; retries stop at the attempt or token budget.
+
 ## Beyond the pipeline
 
 - **Command Center & Telegram** — drive everything from chat: `status`,
