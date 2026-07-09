@@ -7,6 +7,9 @@ bounded auto-retry, so output quality is *systematic, not random*.
 
 Built from the product owner's requirement transcript, demo video and debug
 dashboard reference (see [docs/specs](docs/specs/2026-07-09-deem-design.md)).
+Every architectural decision is explained in depth — with alternatives,
+trade-offs and the mistakes made along the way — in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick start
 
