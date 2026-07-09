@@ -1,0 +1,26 @@
+{
+  "name": "deem",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deem — desktop-first AI engineering. Describe a task in plain English; an AI agent plans, implements, reviews, tests and reports with consistent quality.",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,magenta \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:server": "node server/index.js",
+    "dev:web": "vite --config web/vite.config.js",
+    "build": "vite build --config web/vite.config.js",
+    "start": "NODE_ENV=production node server/index.js",
+    "test": "node --test server/tests/*.test.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.1",
+    "vite": "^5.4.11"
+  }
+}

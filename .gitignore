@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/*.json
+data/exports/
+*.log
+.DS_Store
+My Movie 2-compressed.mp4
+demo-target/
