@@ -207,6 +207,30 @@ class VerifierEngine:
         # for just this one delta (handled below) rather than raising.
         return f"{classname.replace('.', '/')}.py::{name}"
 
+    async def _diff_scoped_lint(self, cand_dir: str,
+                                task: VerificationTask) -> list[dict]:
+        """Lint findings count only on lines the candidate touched — legacy debt is
+        not the Generator's bill. Changed-line map comes from the unified diff."""
+        git = ToolBroker(self.repo_root)
+        diff = await git.invoke("git", sub="diff", a1="--unified=0",
+                                a2=task.baseline_ref, a3=task.candidate_ref)
+        changed: dict[str, set[int]] = {}
+        current = None
+        for line in diff.parsed.get("raw", "").splitlines():
+            if line.startswith("+++ b/"):
+                current = line[6:]
+            elif line.startswith("@@") and current:
+                m = re.search(r"\+(\d+)(?:,(\d+))?", line)
+                start, count = int(m.group(1)), int(m.group(2) or 1)
+                changed.setdefault(current, set()).update(range(start, start + count))
+        broker = ToolBroker(cand_dir)
+        findings: list[dict] = []
+        for path in changed:
+            out = await broker.invoke("ruff-json", path=path)
+            findings += [f for f in out.parsed["findings"]
+                         if f["line"] in changed[f["path"]]]
+        return findings
+
     async def _bleach_flakes(self, cand_dir: str,
                              regressions: list[TestDelta]) -> tuple[list[TestDelta], list[str]]:
         """Rerun each regression K times in the candidate tree. Deterministic failure
