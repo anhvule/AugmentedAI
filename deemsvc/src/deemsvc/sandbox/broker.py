@@ -70,9 +70,14 @@ def _parse_junit(stdout: bytes, workdir: str) -> dict:
 
 def _parse_ruff(stdout: bytes, workdir: str) -> dict:
     findings = json.loads(stdout or b"[]")
+    # realpath, not relpath directly: ruff reports absolute paths resolved against
+    # the real filesystem location it opened, while `workdir` may still contain an
+    # unresolved symlink component (e.g. macOS's /tmp -> /private/tmp) — comparing
+    # the two lexically would silently produce a nonsensical ../.. path.
+    real_workdir = os.path.realpath(workdir)
     return {"findings": [
-        {"path": os.path.relpath(f["filename"], workdir), "line": f["location"]["row"],
-         "code": f["code"], "msg": f["message"][:200]}
+        {"path": os.path.relpath(os.path.realpath(f["filename"]), real_workdir),
+         "line": f["location"]["row"], "code": f["code"], "msg": f["message"][:200]}
         for f in findings
     ]}
 

@@ -667,10 +667,23 @@ async def test_ruff_reports_unused_import(ruff_repo):
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cd deemsvc && .venv/bin/pip install ruff && .venv/bin/pytest tests/test_broker_ruff.py -v`
+Run: `cd deemsvc && .venv/bin/pytest tests/test_broker_ruff.py -v`
 Expected: FAIL with `KeyError: 'ruff-json'`
 
-- [ ] **Step 3: Implement the ruff-json tool spec**
+- [ ] **Step 3: Add ruff as a dev dependency**
+
+`ruff-json`'s argv (`"python3", "-m", "ruff", ...`) resolves through `_render`'s
+existing `sys.executable` substitution (added during Task 3 — see that task's note),
+so it needs `ruff` importable from the deemsvc venv, not the system interpreter. Edit
+`deemsvc/pyproject.toml`'s dev optional dependencies:
+
+```toml
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.4"]
+```
+
+Run: `cd deemsvc && .venv/bin/pip install -e ".[dev]"`
+
+- [ ] **Step 4: Implement the ruff-json tool spec**
 
 Add to `deemsvc/src/deemsvc/sandbox/broker.py` (add `import json` to the imports):
 
@@ -680,9 +693,14 @@ import json
 
 def _parse_ruff(stdout: bytes, workdir: str) -> dict:
     findings = json.loads(stdout or b"[]")
+    # realpath, not relpath directly: ruff reports absolute paths resolved against
+    # the real filesystem location it opened, while `workdir` may still contain an
+    # unresolved symlink component (e.g. macOS's /tmp -> /private/tmp) — comparing
+    # the two lexically would silently produce a nonsensical ../.. path.
+    real_workdir = os.path.realpath(workdir)
     return {"findings": [
-        {"path": f["filename"], "line": f["location"]["row"],
-         "code": f["code"], "msg": f["message"][:200]}
+        {"path": os.path.relpath(os.path.realpath(f["filename"]), real_workdir),
+         "line": f["location"]["row"], "code": f["code"], "msg": f["message"][:200]}
         for f in findings
     ]}
 ```
@@ -701,16 +719,22 @@ Add to `REGISTRY`:
     ),
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+**Note (corrected during implementation):** the fixture (`deemsvc/tests/fixtures/ruff_repo/bad.py`)
+must have exactly one unused import for the test's `next(f for f in findings if
+f["code"] == "F401")` to unambiguously find the intended finding — a fixture with
+two unused imports (e.g. both `os` and `sys`) makes the assertion's target
+non-deterministic across ruff versions/finding order.
+
+- [ ] **Step 5: Run the test to verify it passes**
 
 Run: `cd deemsvc && .venv/bin/pytest tests/test_broker_ruff.py -v`
 Expected: 1 passed
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add deemsvc/src/deemsvc/sandbox/broker.py deemsvc/tests/fixtures/ruff_repo/ \
-        deemsvc/tests/test_broker_ruff.py
+        deemsvc/tests/test_broker_ruff.py deemsvc/pyproject.toml
 git commit -m "feat(deemsvc): add ruff-json tool spec"
 ```
 
