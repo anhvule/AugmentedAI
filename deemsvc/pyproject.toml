@@ -10,6 +10,11 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# tests/fixtures/ holds data repos (e.g. pytest_repo/test_sample.py) consumed by
+# copying them into a tmp_path and driving them via ToolBroker as a subprocess —
+# not real tests. Without this, top-level collection picks them up directly and
+# their intentionally-failing/skipped cases show up as permanent suite noise.
+norecursedirs = ["fixtures", ".*", "build", "dist", "CVS", "_darcs", "{arch}", "*.egg", "venv", ".venv"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
