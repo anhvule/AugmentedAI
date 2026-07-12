@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -62,3 +62,50 @@ class Intent:
             sort_keys=True, separators=(",", ":"),
         )
         return hashlib.sha256(canon.encode()).hexdigest()[:16]
+
+
+@dataclass
+class TokenBudget:
+    """Hierarchical reservation/commit accounting with EWMA cost projection.
+
+    Invariant: committed + sum(reservations) <= ceiling, always — including
+    with N steps concurrently in flight.
+    """
+    ceiling: int
+    compaction_watermark: float = 0.70   # trigger context compaction on workers
+    escalation_watermark: float = 0.92   # refuse new dispatches; drain and escalate
+    _committed: int = 0
+    _reservations: dict[str, int] = field(default_factory=dict)
+    _ewma: dict[str, float] = field(default_factory=dict)
+    _fallbacks: dict[str, int] = field(default_factory=dict)
+    _EWMA_ALPHA: float = 0.30
+
+    def projected_cost(self, step_class: str, fallback: int) -> int:
+        return int(self._ewma.get(step_class, float(fallback)))
+
+    def headroom(self) -> int:
+        return self.ceiling - self._committed - sum(self._reservations.values())
+
+    def pressure(self) -> float:
+        return (self._committed + sum(self._reservations.values())) / self.ceiling
+
+    def reserve(self, step_id: str, step_class: str, fallback: int) -> int:
+        est = self.projected_cost(step_class, fallback)
+        if est > self.headroom():
+            raise BudgetExhausted(needed=est, headroom=self.headroom())
+        self._reservations[step_id] = est
+        if step_class not in self._fallbacks:
+            self._fallbacks[step_class] = fallback
+        return est
+
+    def commit(self, step_id: str, step_class: str, actual: int) -> None:
+        self._reservations.pop(step_id, None)
+        self._committed += actual
+        if step_class not in self._ewma:
+            prev = float(self._fallbacks.get(step_class, actual))
+        else:
+            prev = self._ewma[step_class]
+        self._ewma[step_class] = self._EWMA_ALPHA * actual + (1 - self._EWMA_ALPHA) * prev
+
+    def release(self, step_id: str) -> None:
+        self._reservations.pop(step_id, None)
