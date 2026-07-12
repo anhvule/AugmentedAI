@@ -97,8 +97,9 @@ def test_every_status_has_a_table_entry():
     assert set(_LEGAL.keys()) == set(StepStatus)
 
 
-def test_blocked_can_go_ready_or_abandoned_only():
-    assert _LEGAL[StepStatus.BLOCKED] == frozenset({StepStatus.READY, StepStatus.ABANDONED})
+def test_blocked_can_go_ready_escalated_or_abandoned():
+    assert _LEGAL[StepStatus.BLOCKED] == frozenset({StepStatus.READY, StepStatus.ESCALATED,
+                                                     StepStatus.ABANDONED})
 
 
 def test_terminal_states_have_no_outbound_edges():
@@ -146,8 +147,10 @@ class StepStatus(StrEnum):
 
 
 _LEGAL: dict[StepStatus, frozenset[StepStatus]] = {
-    StepStatus.BLOCKED:    frozenset({StepStatus.READY, StepStatus.ABANDONED}),
-    StepStatus.READY:      frozenset({StepStatus.DISPATCHED, StepStatus.ABANDONED}),
+    StepStatus.BLOCKED:    frozenset({StepStatus.READY, StepStatus.ESCALATED,
+                                      StepStatus.ABANDONED}),
+    StepStatus.READY:      frozenset({StepStatus.DISPATCHED, StepStatus.ESCALATED,
+                                      StepStatus.ABANDONED}),
     StepStatus.DISPATCHED: frozenset({StepStatus.EXECUTING, StepStatus.ESCALATED,
                                       StepStatus.ABANDONED}),
     StepStatus.EXECUTING:  frozenset({StepStatus.VERIFYING, StepStatus.RETRYING,
@@ -170,6 +173,19 @@ class BudgetExhausted(RuntimeError):
         super().__init__(f"needed={needed} headroom={headroom}")
         self.needed, self.headroom = needed, headroom
 ```
+
+**Note (corrected after Task 5's implementation):** the `BLOCKED` and `READY` rows above
+each gained `StepStatus.ESCALATED`, fixing two more instances of the same bug class as
+the `EXECUTING → RETRYING` fix noted earlier in this task. Task 5's `Orchestrator.run()`
+exercises both edges directly: `READY → ESCALATED` fires when `TokenBudget.reserve()`
+raises `BudgetExhausted` for a step already promoted to `READY` by `_frontier()`, and
+`BLOCKED → ESCALATED` fires in the "stuck" branch when a genuine dependency cycle leaves
+one or more steps permanently `BLOCKED` (unable to ever reach `READY`, since `_frontier()`
+only promotes once every dependency has status `PASSED`). Neither edge was originally
+in this table, so both transitions raised `IllegalTransition` instead of the graceful
+escalation the code's own comments describe. Fixed during Task 5's review, with a
+regression test (`test_dependency_cycle_escalates_gracefully_instead_of_crashing` in
+Task 5's `test_orchestrator_run.py`) covering the cycle case.
 
 - [ ] **Step 6: Run the test to verify it passes**
 
