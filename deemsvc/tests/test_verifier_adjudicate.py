@@ -11,7 +11,7 @@ def _task(**overrides) -> VerificationTask:
 
 
 def test_zero_regressions_and_all_criteria_met_passes():
-    engine = VerifierEngine()
+    engine = VerifierEngine("/repo")
     semantic = {"criteria": [{"id": "AC-1", "met": True, "evidence": "diff shows it"}]}
     verdict = engine._adjudicate(_task(), budget_headroom=100_000,
                                  regressions=[], new_failing=[], flaky=[], lint=[],
@@ -20,7 +20,7 @@ def test_zero_regressions_and_all_criteria_met_passes():
 
 
 def test_a_confirmed_regression_never_passes_regardless_of_semantic_judgment():
-    engine = VerifierEngine()
+    engine = VerifierEngine("/repo")
     semantic = {"criteria": [{"id": "AC-1", "met": True, "evidence": "looks right"}]}
     regression = [TestDelta("t1", Transition.REGRESSION, "boom")]
     verdict = engine._adjudicate(_task(), budget_headroom=100_000,
@@ -30,7 +30,7 @@ def test_a_confirmed_regression_never_passes_regardless_of_semantic_judgment():
 
 
 def test_unmet_criterion_on_a_green_matrix_blocks_pass():
-    engine = VerifierEngine()
+    engine = VerifierEngine("/repo")
     semantic = {"criteria": [{"id": "AC-1", "met": False, "evidence": "not found in diff"}]}
     verdict = engine._adjudicate(_task(), budget_headroom=100_000,
                                  regressions=[], new_failing=[], flaky=[], lint=[],
@@ -39,7 +39,7 @@ def test_unmet_criterion_on_a_green_matrix_blocks_pass():
 
 
 def test_novel_signature_with_budget_and_attempts_retries_with_feedback():
-    engine = VerifierEngine()
+    engine = VerifierEngine("/repo")
     semantic = {"criteria": []}
     regression = [TestDelta("t1", Transition.REGRESSION, "boom")]
     verdict = engine._adjudicate(_task(attempt=1, max_attempts=3), budget_headroom=100_000,
@@ -51,7 +51,7 @@ def test_novel_signature_with_budget_and_attempts_retries_with_feedback():
 
 
 def test_attempt_ceiling_escalates_even_with_budget_headroom():
-    engine = VerifierEngine()
+    engine = VerifierEngine("/repo")
     regression = [TestDelta("t1", Transition.REGRESSION, "boom")]
     verdict = engine._adjudicate(_task(attempt=3, max_attempts=3), budget_headroom=100_000,
                                  regressions=regression, new_failing=[], flaky=[], lint=[],
@@ -61,7 +61,7 @@ def test_attempt_ceiling_escalates_even_with_budget_headroom():
 
 
 def test_budget_below_floor_escalates_even_on_first_attempt():
-    engine = VerifierEngine()
+    engine = VerifierEngine("/repo")
     regression = [TestDelta("t1", Transition.REGRESSION, "boom")]
     verdict = engine._adjudicate(_task(attempt=1, max_attempts=3),
                                  budget_headroom=engine.TOKEN_FLOOR - 1,
@@ -72,7 +72,7 @@ def test_budget_below_floor_escalates_even_on_first_attempt():
 
 
 def test_repeated_signature_escalates_instead_of_retrying_again():
-    engine = VerifierEngine()
+    engine = VerifierEngine("/repo")
     regression = [TestDelta("t1", Transition.REGRESSION, "boom")]
     sig = engine._failure_signature(regression, [], [])
     verdict = engine._adjudicate(_task(attempt=2, max_attempts=5, prior_signatures=frozenset({sig})),
@@ -84,7 +84,7 @@ def test_repeated_signature_escalates_instead_of_retrying_again():
 
 
 def test_flaky_quarantine_and_lint_findings_are_carried_through_the_verdict():
-    engine = VerifierEngine()
+    engine = VerifierEngine("/repo")
     verdict = engine._adjudicate(_task(), budget_headroom=100_000,
                                  regressions=[], new_failing=[], flaky=["t_flaky"],
                                  lint=[{"path": "a.py", "line": 1, "code": "F401", "msg": "unused"}],

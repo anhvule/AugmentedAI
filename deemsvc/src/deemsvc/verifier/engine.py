@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal
+from typing import AsyncIterator, Literal
+
+from deemsvc.sandbox.broker import OutcomeKind, ToolBroker
 
 
 class Transition(StrEnum):
@@ -59,6 +63,41 @@ class Verdict:
 class VerifierEngine:
     FLAKE_RERUNS = 3
     TOKEN_FLOOR = 30_000        # below this headroom, retrying is throwing good after bad
+
+    def __init__(self, repo_root: str, client=None):
+        self.repo_root = repo_root
+        self.client = client  # AsyncAnthropic | None — wired in Task 7
+
+    @contextlib.asynccontextmanager
+    async def _twin_worktrees(self, task: VerificationTask) -> AsyncIterator[tuple[str, str]]:
+        """Two detached worktrees: baseline at merge-base, candidate at the proposed ref.
+
+        Neither shares state with the Generator's worktree; both are destroyed on exit.
+        This IS the context boundary — verification consumes git objects, not narrative.
+        """
+        base = os.path.join(self.repo_root, ".deemsvc", f"wt-base-{task.step_id}")
+        cand = os.path.join(self.repo_root, ".deemsvc", f"wt-cand-{task.step_id}")
+        git = ToolBroker(self.repo_root)
+        for path, ref in ((base, task.baseline_ref), (cand, task.candidate_ref)):
+            out = await git.invoke("git", sub="worktree", a1="add",
+                                   a2="--detach", a3=path, a4=ref)
+            if out.kind is not OutcomeKind.TOOL_OK:
+                raise RuntimeError(f"worktree add failed: {out.stderr_tail}")
+        try:
+            yield base, cand
+        finally:
+            for path in (base, cand):
+                # No trailing "." — `git worktree remove --force <path>` takes exactly
+                # one path argument; the blueprint's reference call included a stray
+                # extra argument that this plan drops.
+                await git.invoke("git", sub="worktree", a1="remove", a2="--force", a3=path)
+
+    async def _snapshot(self, workdir: str, selector: str = "tests") -> dict[str, str]:
+        broker = ToolBroker(workdir)
+        out = await broker.invoke("pytest-junit", selector=selector)
+        if out.kind not in (OutcomeKind.TOOL_OK, OutcomeKind.TASK_SIGNAL):
+            raise RuntimeError(f"suite did not run ({out.kind}): {out.stderr_tail}")
+        return out.parsed["cases"]          # {test_id: "PASS" | "FAIL:<head>" | "SKIP"}
 
     @staticmethod
     def _diff_outcomes(before: dict[str, str], after: dict[str, str]) -> list[TestDelta]:
