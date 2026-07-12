@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import os
 import re
+import resource
+import signal
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Callable
@@ -60,6 +64,20 @@ REGISTRY: dict[str, ToolSpec] = {
 }
 
 
+def _confine(timeout_s: int) -> Callable[[], None]:
+    def hook() -> None:
+        resource.setrlimit(resource.RLIMIT_CPU, (timeout_s, timeout_s + 10))
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (6 << 30, 6 << 30))
+        except (ValueError, OSError):
+            # RLIMIT_AS cannot be lowered on some platforms (e.g. macOS/Darwin
+            # rejects it unconditionally with EINVAL) — best-effort only.
+            pass
+        resource.setrlimit(resource.RLIMIT_NOFILE, (512, 512))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (512 << 20, 512 << 20))
+    return hook
+
+
 class ToolBroker:
     def __init__(self, workdir: str):
         self.workdir = workdir
@@ -85,3 +103,63 @@ class ToolBroker:
             else:
                 argv.append(token)
         return argv
+
+    @staticmethod
+    async def _drain(stream: asyncio.StreamReader, cap: int) -> tuple[bytes, bool]:
+        buf, truncated = bytearray(), False
+        while chunk := await stream.read(65536):
+            if len(buf) < cap:
+                take = chunk[: cap - len(buf)]
+                buf += take
+                if len(take) < len(chunk):
+                    truncated = True   # this chunk alone overflowed the cap
+            else:
+                truncated = True   # keep draining so the child never blocks on a full pipe
+        return bytes(buf), truncated
+
+    async def invoke(self, tool: str, **args: str) -> ToolOutcome:
+        spec = REGISTRY[tool]
+        argv = self._render(spec, args)
+        os.makedirs(os.path.join(self.workdir, ".deemsvc"), exist_ok=True)
+        t0 = asyncio.get_running_loop().time()
+
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=self.workdir,
+            env=self._env,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+            preexec_fn=_confine(spec.timeout_s),
+        )
+        out_task = asyncio.create_task(self._drain(proc.stdout, spec.max_output))
+        err_task = asyncio.create_task(self._drain(proc.stderr, 64 << 10))
+
+        try:
+            code = await asyncio.wait_for(proc.wait(), timeout=spec.timeout_s)
+        except asyncio.TimeoutError:
+            os.killpg(proc.pid, signal.SIGKILL)   # whole group — child spawns included
+            await proc.wait()
+            out_task.cancel(); err_task.cancel()
+            return ToolOutcome(OutcomeKind.TIMEOUT, None, {}, False,
+                               stderr_tail="", wall_ms=spec.timeout_s * 1000)
+
+        stdout, truncated = await out_task
+        stderr, _ = await err_task
+        wall_ms = int((asyncio.get_running_loop().time() - t0) * 1000)
+
+        if code in spec.ok_exits or code in spec.signal_exits:
+            try:
+                parsed = spec.parser(stdout, self.workdir)
+            except Exception as exc:            # report artifact missing / malformed
+                return ToolOutcome(OutcomeKind.INFRA_FAILURE, code,
+                                   {"parse_error": repr(exc)}, truncated,
+                                   stderr[-2048:].decode(errors="replace"), wall_ms)
+            kind = OutcomeKind.TOOL_OK if code in spec.ok_exits else OutcomeKind.TASK_SIGNAL
+            return ToolOutcome(kind, code, parsed, truncated,
+                               stderr[-2048:].decode(errors="replace"), wall_ms)
+
+        kind = OutcomeKind.TOOL_MISUSE if 1 <= code <= 4 else OutcomeKind.INFRA_FAILURE
+        return ToolOutcome(kind, code, {}, truncated,
+                           stderr[-2048:].decode(errors="replace"), wall_ms)
