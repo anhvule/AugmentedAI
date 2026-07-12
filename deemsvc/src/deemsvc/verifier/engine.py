@@ -303,3 +303,19 @@ class VerifierEngine:
             return {"criteria": [], "scope_creep": False,
                     "notes": "judge declined; mechanical evidence governs"}
         return json.loads(response.content[-1].text)
+
+    async def verify(self, task: VerificationTask, budget_headroom: int) -> Verdict:
+        async with self._twin_worktrees(task) as (base_dir, cand_dir):
+            before = await self._snapshot(base_dir)
+            after = await self._snapshot(cand_dir)
+            deltas = self._diff_outcomes(before, after)
+
+            regressions = [d for d in deltas if d.kind is Transition.REGRESSION]
+            regressions, flaky = await self._bleach_flakes(cand_dir, regressions)
+            new_failing = [d for d in deltas if d.kind is Transition.NEW_FAILING]
+
+            lint = await self._diff_scoped_lint(cand_dir, task)
+            semantic = await self._semantic_review(task, cand_dir, deltas)
+
+            return self._adjudicate(task, budget_headroom,
+                                    regressions, new_failing, flaky, lint, semantic)
