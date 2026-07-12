@@ -5,6 +5,7 @@ import os
 import re
 import resource
 import signal
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Callable
@@ -47,6 +48,24 @@ def _parse_raw(stdout: bytes, workdir: str) -> dict:
     return {"raw": text, "stdout": text}
 
 
+def _parse_junit(stdout: bytes, workdir: str) -> dict:
+    """pytest writes JUnit XML to a known path; stdout is advisory only."""
+    report = os.path.join(workdir, ".deemsvc", "junit.xml")
+    cases: dict[str, str] = {}
+    root = ET.parse(report).getroot()
+    for tc in root.iter("testcase"):
+        tid = f"{tc.get('classname', '')}::{tc.get('name', '')}"
+        child = next(iter(tc), None)
+        if child is None:
+            cases[tid] = "PASS"
+        elif child.tag in ("failure", "error"):
+            head = (child.get("message") or child.text or "")[:400]
+            cases[tid] = f"FAIL:{head}"
+        elif child.tag == "skipped":
+            cases[tid] = "SKIP"
+    return {"cases": cases, "total": len(cases)}
+
+
 REGISTRY: dict[str, ToolSpec] = {
     "git": ToolSpec(
         name="git",
@@ -60,6 +79,15 @@ REGISTRY: dict[str, ToolSpec] = {
         signal_exits=frozenset(),
         parser=_parse_raw,
         max_output=8 << 20,
+    ),
+    "pytest-junit": ToolSpec(
+        name="pytest-junit",
+        argv=("python3", "-m", "pytest", "-q", "-p", "no:cacheprovider",
+              "--junitxml=.deemsvc/junit.xml", "{selector}"),
+        timeout_s=600,
+        ok_exits=frozenset({0}),
+        signal_exits=frozenset({1, 5}),       # 1 = failures, 5 = nothing collected
+        parser=_parse_junit,
     ),
 }
 
@@ -81,6 +109,10 @@ def _confine(timeout_s: int) -> Callable[[], None]:
 class ToolBroker:
     def __init__(self, workdir: str):
         self.workdir = workdir
+        # Compute PYTHONPATH to include user site-packages for tools like pytest
+        # that are installed via --user in Python 3.9
+        user_site = os.path.expanduser("~/Library/Python/3.9/lib/python/site-packages")
+        pythonpath = user_site if os.path.exists(user_site) else ""
         self._env = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "HOME": workdir,
@@ -89,6 +121,8 @@ class ToolBroker:
             "GIT_TERMINAL_PROMPT": "0",
             "CI": "1",
         }
+        if pythonpath:
+            self._env["PYTHONPATH"] = pythonpath
 
     def _render(self, spec: ToolSpec, args: dict[str, str]) -> list[str]:
         argv: list[str] = []
