@@ -14,11 +14,12 @@ def test_terminal_states_have_no_outbound_edges():
     assert _LEGAL[StepStatus.ABANDONED] == frozenset()
 
 
-def test_verifying_to_retrying_is_the_only_route_back_to_generation():
-    # VERIFYING -> RETRYING exists; nothing else transitions directly into RETRYING
-    # except via VERIFYING (retry is always a verifier adjudication, never self-initiated).
+def test_retrying_is_reachable_only_from_executing_or_verifying():
+    # RETRYING is reached either directly from EXECUTING (a dispatch result
+    # says "retry") or from VERIFYING (a verifier adjudication says "retry")
+    # — never injected from any other state.
     sources_of_retrying = [s for s, targets in _LEGAL.items() if StepStatus.RETRYING in targets]
-    assert sources_of_retrying == [StepStatus.VERIFYING]
+    assert set(sources_of_retrying) == {StepStatus.EXECUTING, StepStatus.VERIFYING}
 
 
 def test_escalated_to_ready_is_the_only_reentry_point():
