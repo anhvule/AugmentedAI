@@ -6,3 +6,10 @@ data/exports/
 .DS_Store
 My Movie 2-compressed.mp4
 demo-target/
+
+# deemsvc (Python)
+deemsvc/.venv/
+deemsvc/src/*.egg-info/
+**/__pycache__/
+*.pyc
+.pytest_cache/
