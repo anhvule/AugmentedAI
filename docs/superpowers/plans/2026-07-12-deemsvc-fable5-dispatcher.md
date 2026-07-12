@@ -1,22 +1,25 @@
-# deemsvc Fable 5 Dispatcher Implementation Plan
+# deemsvc Pluggable Agent Adapters Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the Fable-5-native agent loop — the per-role request builder, the
-path-confined memory tool, the model-facing tool schemas, and `FableDispatcher`, the
-concrete implementation of the `dispatch: Callable[[Step], Awaitable[StepResult]]`
-interface that `Orchestrator.run()` (from `deemsvc-orchestrator-core`) accepts as a
-plug-in. This is the component that finally replaces `server/agents/claude.js` and
-`server/agents/codex.js`.
+**Goal:** Build a formal `AgentAdapter` contract — the same
+`Callable[[Step], Awaitable[StepResult]]` shape `Orchestrator.dispatch` already
+expects — and ship three concrete implementations behind it: `FableDispatcher`
+(direct Anthropic API, Fable-5-native: task budgets, memory tool, effort levels),
+and CLI-backed adapters for `claude-code-cli` and `codex-cli`. All three plug into
+`GenerateThenVerifyDispatcher` (built in `deemsvc-service-node-integration`)
+identically, so any of them can be selected per run without touching the
+Orchestrator, the Verifier, or the FastAPI service.
 
-**Architecture:** `build_request(role, ...)` encodes every Fable-5-specific API rule
-(effort levels, no sampling params, no explicit `thinking` unless surfacing reasoning,
-always-on fallbacks) in one place per `docs/AI-CODING-AGENT-ARCHITECTURAL-BLUEPRINT.md`
-§8.1, so no call site can drift. `FableDispatcher.__call__(step)` assembles a role
-request, runs the streaming tool-use loop against the real Anthropic API — dispatching
-`memory`, `run_tests`, `send_to_user`, and text-editor tool calls through the Task-2
-`ToolBroker` and a new `MemoryStore` — and returns a *proposed* `StepResult` whose
-`candidate_ref` comes from `git rev-parse HEAD`, never from the model's own claim.
+**Architecture:** The key insight that makes this pluggable without weakening the
+architecture's ground-truth guarantee: the Verifier never needs to know *how* a
+candidate commit was produced — only that `git rev-parse HEAD` in the worktree
+points at something. Every adapter, API-native or CLI-based, computes
+`candidate_ref` from git after the agent's process exits and never trusts the
+agent's own claim of success. `build_request(role, ...)` still encodes every
+Fable-5-specific API rule (effort levels, no sampling params, always-on fallbacks)
+in one place for the one adapter that needs it; `CliAgentAdapter` needs none of that
+machinery — it shells out, waits, and checks git.
 
 **Tech Stack:** Python 3.11+, `anthropic` (AsyncAnthropic, streaming), `pytest`,
 `pytest-asyncio`.
@@ -25,16 +28,28 @@ request, runs the streaming tool-use loop against the real Anthropic API — dis
 
 - Depends on `deemsvc-tool-broker` (`ToolBroker`, `OutcomeKind`) and
   `deemsvc-orchestrator-core` (`Step`, `StepResult`).
-- Model is always `"claude-fable-5"`, with `fallbacks=[{"model": "claude-opus-4-8"}]`
-  on every request — never omit the fallback.
-- Never pass `temperature`, `top_p`, or `top_k` — Fable 5 rejects them with a 400.
-- Never pass an explicit `thinking` key unless `surface_reasoning` is true for the
-  role — omitting it keeps adaptive thinking on by default.
+- `FableDispatcher`'s model is always `"claude-fable-5"`, with
+  `fallbacks=[{"model": "claude-opus-4-8"}]` on every request — never omit the
+  fallback. Never pass `temperature`, `top_p`, or `top_k` — Fable 5 rejects them
+  with a 400. Never pass an explicit `thinking` key unless `surface_reasoning` is
+  true for the role.
+- CLI adapters (`claude-code-cli`, `codex-cli`) require the respective CLI
+  installed and authenticated on the host — same operational requirement the old
+  `server/agents/claude.js`/`codex.js` had. Tests in this plan never depend on the
+  real CLIs being installed: they exercise `CliAgentAdapter` against a small fake
+  shell script fixture, since the adapter's behavior (compute `candidate_ref` from
+  git, never trust the process's own output) is identical regardless of which real
+  binary is behind it.
+- **Invariant that must hold for every adapter, present and future:** `candidate_ref`
+  is always computed by the adapter from `git rev-parse HEAD` in the worktree after
+  the agent process/API call completes — never parsed or trusted from the agent's
+  own stdout, transcript, or self-reported claim. This is what lets
+  `GenerateThenVerifyDispatcher` route any adapter's output through the same
+  Verifier arbitration uniformly.
 - Source reference: `docs/AI-CODING-AGENT-ARCHITECTURAL-BLUEPRINT.md` §8 (`sdk/request.py`,
-  `sdk/memory.py`, `sdk/tools.py`, `sdk/dispatch.py`), which this plan adapts
-  near-verbatim, plus the note in `deemsvc-verifier-engine` Task 7 to route
-  `VerifierEngine._semantic_review` through `build_request` once it exists here
-  (Task 5 of this plan performs that follow-up).
+  `sdk/memory.py`, `sdk/tools.py`, `sdk/dispatch.py`) for the `FableDispatcher` half of
+  this plan; the CLI adapters and the `AgentAdapter` protocol are new design not in
+  the source blueprint, needed to satisfy the pluggability requirement.
 - Live-API tests are marked `@pytest.mark.skipif(not os.environ.get("ANTHROPIC_API_KEY"), ...)`.
 
 ---
@@ -164,7 +179,8 @@ def build_request(
 ) -> tuple[dict, list[str]]:
     """Returns (kwargs, betas). Encodes every Fable 5 rule in one place so no
     call site can drift: no thinking config unless surfacing reasoning, effort
-    in output_config, no sampling params, fallbacks always on."""
+    in output_config, no sampling params, fallbacks always on. Used only by the
+    FableDispatcher adapter (Task 5) — CLI adapters (Task 6) don't call this."""
     p = PROFILES[role]
     betas = ["server-side-fallback-2026-06-01"]
 
@@ -532,15 +548,107 @@ git commit -m "feat(deemsvc): add model-facing tool schemas for the generator ro
 
 ---
 
-### Task 4: FableDispatcher — the agentic tool-use loop, tested against a stubbed client
+### Task 4: The AgentAdapter protocol
+
+**Files:**
+- Create: `deemsvc/src/deemsvc/sdk/adapter.py`
+- Create: `deemsvc/tests/test_sdk_adapter_protocol.py`
+
+**Interfaces:**
+- Consumes: `Step`, `StepResult` from `deemsvc-orchestrator-core`.
+- Produces: `AgentAdapter` (a `@runtime_checkable` `Protocol`: `async def __call__(self, step: Step) -> StepResult`) — the single contract every concrete backend (Task 5's `FableDispatcher`, Task 6's `CliAgentAdapter`, and any future backend) satisfies. Nothing outside `deemsvc/src/deemsvc/sdk/` needs to change to add a new backend; it only needs a class matching this shape, registered in Task 7.
+
+- [ ] **Step 1: Write the failing test**
+
+`deemsvc/tests/test_sdk_adapter_protocol.py`:
+
+```python
+import pytest
+
+from deemsvc.orchestrator.state import Step, StepResult
+from deemsvc.sdk.adapter import AgentAdapter
+
+
+class _TrivialAdapter:
+    async def __call__(self, step: Step) -> StepResult:
+        return StepResult(step.id, "pass", 0, {})
+
+
+def test_a_correctly_shaped_class_satisfies_the_protocol():
+    assert isinstance(_TrivialAdapter(), AgentAdapter)
+
+
+def test_an_object_missing_call_does_not_satisfy_the_protocol():
+    class NotAnAdapter:
+        pass
+    assert not isinstance(NotAnAdapter(), AgentAdapter)
+
+
+@pytest.mark.asyncio
+async def test_the_trivial_adapter_actually_works_as_a_dispatch_callable():
+    step = Step(id="s", step_class="generate", payload={}, deps=frozenset())
+    result = await _TrivialAdapter()(step)
+    assert result.verdict == "pass"
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cd deemsvc && .venv/bin/pytest tests/test_sdk_adapter_protocol.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'deemsvc.sdk.adapter'`
+
+- [ ] **Step 3: Implement the AgentAdapter protocol**
+
+`deemsvc/src/deemsvc/sdk/adapter.py`:
+
+```python
+from __future__ import annotations
+
+from typing import Protocol, runtime_checkable
+
+from deemsvc.orchestrator.state import Step, StepResult
+
+
+@runtime_checkable
+class AgentAdapter(Protocol):
+    """The one contract every pluggable agent backend must satisfy — the same
+    Callable[[Step], Awaitable[StepResult]] shape Orchestrator.dispatch and
+    GenerateThenVerifyDispatcher already expect. FableDispatcher (Task 5) and
+    CliAgentAdapter (Task 6) are the two concrete implementations this plan
+    ships; a third backend is a third class satisfying this same __call__
+    signature registered in ADAPTER_FACTORIES (Task 7) — no other file in
+    deemsvc needs to change.
+
+    Invariant every implementation must uphold (see Global Constraints):
+    candidate_ref is always computed from `git rev-parse HEAD` after the
+    agent's work is done, never parsed from the agent's own output.
+    """
+
+    async def __call__(self, step: Step) -> StepResult: ...
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `cd deemsvc && .venv/bin/pytest tests/test_sdk_adapter_protocol.py -v`
+Expected: 3 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add deemsvc/src/deemsvc/sdk/adapter.py deemsvc/tests/test_sdk_adapter_protocol.py
+git commit -m "feat(deemsvc): define the AgentAdapter protocol pluggable backends satisfy"
+```
+
+---
+
+### Task 5: FableDispatcher — the Anthropic-native agentic tool-use loop
 
 **Files:**
 - Create: `deemsvc/src/deemsvc/sdk/dispatch.py`
 - Create: `deemsvc/tests/test_sdk_dispatch_stub.py`
 
 **Interfaces:**
-- Consumes: `build_request` (Task 1), `MemoryStore` (Task 2), `ToolBroker`/`OutcomeKind` from `deemsvc-tool-broker`, `Step`/`StepResult` from `deemsvc-orchestrator-core`.
-- Produces: `FableDispatcher` (class: `__init__(client, run_root: str)`; `async def __call__(step: Step) -> StepResult`).
+- Consumes: `build_request` (Task 1), `MemoryStore` (Task 2), `AgentAdapter` (Task 4), `ToolBroker`/`OutcomeKind` from `deemsvc-tool-broker`, `Step`/`StepResult` from `deemsvc-orchestrator-core`.
+- Produces: `FableDispatcher` (class: `__init__(client, run_root: str)`; `async def __call__(step: Step) -> StepResult`) — satisfies `AgentAdapter`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -554,6 +662,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from deemsvc.orchestrator.state import Step
+from deemsvc.sdk.adapter import AgentAdapter
 from deemsvc.sdk.dispatch import FableDispatcher
 
 
@@ -609,6 +718,10 @@ def _step(worktree_path: str) -> Step:
             "capability_grant": {"worktree": worktree_path},
         },
     )
+
+
+def test_fable_dispatcher_satisfies_the_agent_adapter_protocol():
+    assert isinstance(FableDispatcher(client=None, run_root="."), AgentAdapter)
 
 
 @pytest.mark.asyncio
@@ -687,6 +800,11 @@ from .request import build_request
 
 
 class FableDispatcher:
+    """Direct-Anthropic-API adapter. One of several AgentAdapter implementations
+    (see sdk/adapter.py) — the one with Fable-5-specific capabilities (task
+    budgets, memory tool, effort levels). CLI-backed adapters (sdk/cli_adapter.py)
+    have none of this machinery and are equally valid AgentAdapters."""
+
     def __init__(self, client, run_root: str):
         self.client = client
         self.run_root = run_root
@@ -775,18 +893,369 @@ class FableDispatcher:
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `cd deemsvc && .venv/bin/pytest tests/test_sdk_dispatch_stub.py -v`
-Expected: 3 passed
+Expected: 4 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add deemsvc/src/deemsvc/sdk/dispatch.py deemsvc/tests/test_sdk_dispatch_stub.py
-git commit -m "feat(deemsvc): add FableDispatcher tool-use loop, tested against a stub client"
+git commit -m "feat(deemsvc): add FableDispatcher, the Anthropic-native AgentAdapter"
 ```
 
 ---
 
-### Task 5: Route VerifierEngine's semantic review through build_request
+### Task 6: CLI-backed adapters — claude-code-cli and codex-cli
+
+**Files:**
+- Create: `deemsvc/src/deemsvc/sdk/cli_adapter.py`
+- Create: `deemsvc/tests/test_sdk_cli_adapter.py`
+
+**Interfaces:**
+- Consumes: `AgentAdapter` (Task 4), `ToolBroker`/`OutcomeKind` from `deemsvc-tool-broker`, `Step`/`StepResult` from `deemsvc-orchestrator-core`.
+- Produces: `CliAdapterSpec` (frozen dataclass: `name: str, argv: tuple[str, ...], prompt_via: Literal["stdin","arg"], timeout_s: int = 1800`), `CliAgentAdapter` (class: `__init__(spec: CliAdapterSpec)`; `async def __call__(step: Step) -> StepResult`) — satisfies `AgentAdapter`.
+
+- [ ] **Step 1: Write the failing test**
+
+`deemsvc/tests/test_sdk_cli_adapter.py`:
+
+```python
+import stat
+import subprocess
+
+import pytest
+
+from deemsvc.orchestrator.state import Step
+from deemsvc.sdk.adapter import AgentAdapter
+from deemsvc.sdk.cli_adapter import CliAdapterSpec, CliAgentAdapter
+
+
+def _fake_cli_script(tmp_path, body: str) -> str:
+    """A hermetic stand-in for `claude`/`codex` — no real CLI or network
+    dependency. What's under test is CliAgentAdapter's behavior (compute
+    candidate_ref from git, ignore the process's own claims, enforce the
+    timeout), which is identical no matter which real binary sits behind it."""
+    script = tmp_path / "fake-cli"
+    script.write_text(body)
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return str(script)
+
+
+@pytest.fixture
+def worktree(tmp_path):
+    repo = tmp_path / "worktree"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    (repo / "README.md").write_text("hi\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+    return repo
+
+
+def _step(worktree_path: str) -> Step:
+    return Step(
+        id="impl", step_class="generate", deps=frozenset(),
+        payload={"objective": "add a line to README",
+                "capability_grant": {"worktree": worktree_path}},
+    )
+
+
+def test_cli_agent_adapter_satisfies_the_agent_adapter_protocol():
+    spec = CliAdapterSpec(name="fake", argv=("true",), prompt_via="stdin")
+    assert isinstance(CliAgentAdapter(spec), AgentAdapter)
+
+
+@pytest.mark.asyncio
+async def test_candidate_ref_comes_from_git_never_from_the_cli_own_claim(tmp_path, worktree):
+    # The fake CLI commits a real change AND prints an unrelated success claim —
+    # the adapter must derive candidate_ref from git, not from stdout.
+    script = _fake_cli_script(tmp_path, f"""#!/bin/sh
+cd "{worktree}"
+echo "second line" >> README.md
+git add -A
+git commit -q -m "candidate"
+echo '{{"type": "tool_use", "name": "edit"}}'
+echo '{{"type": "result", "success": true, "note": "trust me, it works"}}'
+""")
+    spec = CliAdapterSpec(name="fake-cli", argv=(script,), prompt_via="stdin", timeout_s=10)
+    adapter = CliAgentAdapter(spec)
+    result = await adapter(_step(str(worktree)))
+
+    assert result.verdict == "pass"
+    assert len(result.evidence["candidate_ref"]) == 40
+    assert result.evidence["tool_calls"] == 1
+    assert result.evidence["cli"] == "fake-cli"
+
+
+@pytest.mark.asyncio
+async def test_no_commit_means_retry_regardless_of_what_the_cli_printed(tmp_path, worktree):
+    script = _fake_cli_script(tmp_path, "#!/bin/sh\necho '{\"type\": \"result\", \"success\": true}'\n")
+    spec = CliAdapterSpec(name="fake-cli", argv=(script,), prompt_via="stdin", timeout_s=10)
+    adapter = CliAgentAdapter(spec)
+    result = await adapter(_step(str(worktree)))
+    assert result.verdict == "retry"
+    assert result.evidence["candidate_ref"] == ""
+
+
+@pytest.mark.asyncio
+async def test_a_slow_process_is_killed_and_reported_as_retry(tmp_path, worktree):
+    script = _fake_cli_script(tmp_path, "#!/bin/sh\nsleep 5\n")
+    spec = CliAdapterSpec(name="fake-cli", argv=(script,), prompt_via="stdin", timeout_s=1)
+    adapter = CliAgentAdapter(spec)
+    result = await adapter(_step(str(worktree)))
+    assert result.verdict == "retry"
+    assert "timed out" in result.evidence["error"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_via_arg_appends_the_objective_as_an_argv_element(tmp_path, worktree):
+    # A script that echoes its own argv, so we can see the objective arrived.
+    script = _fake_cli_script(tmp_path, '#!/bin/sh\necho "argv: $@"\n')
+    spec = CliAdapterSpec(name="fake-cli", argv=(script,), prompt_via="arg", timeout_s=10)
+    adapter = CliAgentAdapter(spec)
+    step = _step(str(worktree))
+    await adapter(step)  # no commit is made; we only care that it didn't crash
+    # Sanity: prompt_via="arg" doesn't write to stdin, so a script expecting
+    # stdin input would hang — this test passing (not timing out) is the proof.
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cd deemsvc && .venv/bin/pytest tests/test_sdk_cli_adapter.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'deemsvc.sdk.cli_adapter'`
+
+- [ ] **Step 3: Implement CliAdapterSpec and CliAgentAdapter**
+
+`deemsvc/src/deemsvc/sdk/cli_adapter.py`:
+
+```python
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import signal
+from dataclasses import dataclass
+from typing import Literal
+
+from deemsvc.orchestrator.state import Step, StepResult
+from deemsvc.sandbox.broker import OutcomeKind, ToolBroker
+
+
+@dataclass(frozen=True)
+class CliAdapterSpec:
+    """Fixed argv template + prompt-delivery convention for one CLI-based
+    coding agent. Adding a fourth CLI tool means adding a fourth CliAdapterSpec
+    instance in registry.py — never a new adapter class."""
+    name: str
+    argv: tuple[str, ...]           # e.g. ("claude", "-p", "--output-format", "stream-json")
+    prompt_via: Literal["stdin", "arg"]   # how the objective text is delivered
+    timeout_s: int = 1800
+
+
+class CliAgentAdapter:
+    """Implements AgentAdapter by shelling out to an installed CLI coding tool.
+    Same invariant as FableDispatcher: the CLI's own transcript/self-report is
+    never trusted — candidate_ref always comes from `git rev-parse HEAD` via
+    ToolBroker, computed after the subprocess exits, regardless of what the CLI
+    printed. This is what lets CLI-backed generation be routed through
+    GenerateThenVerifyDispatcher's Verifier arbitration exactly like Fable 5
+    native generation does — the Verifier only ever needs a git ref."""
+
+    def __init__(self, spec: CliAdapterSpec):
+        self.spec = spec
+
+    async def __call__(self, step: Step) -> StepResult:
+        grant = step.payload["capability_grant"]
+        worktree = grant["worktree"]
+        objective = step.payload["objective"]
+
+        argv = list(self.spec.argv)
+        if self.spec.prompt_via == "arg":
+            argv.append(objective)
+
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=worktree, env=env,
+            stdin=asyncio.subprocess.PIPE if self.spec.prompt_via == "stdin" else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        if self.spec.prompt_via == "stdin":
+            proc.stdin.write(objective.encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=self.spec.timeout_s)
+        except asyncio.TimeoutError:
+            os.killpg(proc.pid, signal.SIGKILL)
+            await proc.wait()
+            return StepResult(step.id, "retry", 0,
+                              evidence={"candidate_ref": "",
+                                       "error": f"{self.spec.name} timed out after {self.spec.timeout_s}s"})
+
+        tool_calls = 0
+        for line in stdout.decode(errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "tool_use":
+                tool_calls += 1
+
+        broker = ToolBroker(worktree)
+        head = await broker.invoke("git", sub="rev-parse", a1="HEAD")
+        candidate_ref = head.parsed.get("stdout", "").strip() if head.kind is OutcomeKind.TOOL_OK else ""
+
+        # Never trust the CLI's own success claim — only a real commit counts.
+        verdict = "pass" if candidate_ref else "retry"
+        return StepResult(step.id, verdict, tokens_spent=0,  # CLIs don't report usage uniformly
+                          evidence={"candidate_ref": candidate_ref, "tool_calls": tool_calls,
+                                   "cli": self.spec.name})
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `cd deemsvc && .venv/bin/pytest tests/test_sdk_cli_adapter.py -v`
+Expected: 5 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add deemsvc/src/deemsvc/sdk/cli_adapter.py deemsvc/tests/test_sdk_cli_adapter.py
+git commit -m "feat(deemsvc): add CLI-backed AgentAdapter for claude-code-cli and codex-cli"
+```
+
+---
+
+### Task 7: Adapter registry — selecting a backend by name
+
+**Files:**
+- Create: `deemsvc/src/deemsvc/sdk/registry.py`
+- Create: `deemsvc/tests/test_sdk_registry.py`
+
+**Interfaces:**
+- Consumes: `AgentAdapter` (Task 4), `FableDispatcher` (Task 5), `CliAdapterSpec`/`CliAgentAdapter` (Task 6).
+- Produces: `AdapterContext` (dataclass: `client: object | None = None, run_root: str = "."`), `CLAUDE_CODE_CLI: CliAdapterSpec`, `CODEX_CLI: CliAdapterSpec`, `ADAPTER_FACTORIES: dict[str, Callable[[AdapterContext], AgentAdapter]]` (keys: `"fable5-native", "claude-code-cli", "codex-cli"`), `build_adapter(name: str, ctx: AdapterContext) -> AgentAdapter`.
+
+- [ ] **Step 1: Write the failing test**
+
+`deemsvc/tests/test_sdk_registry.py`:
+
+```python
+import pytest
+
+from deemsvc.sdk.adapter import AgentAdapter
+from deemsvc.sdk.cli_adapter import CliAgentAdapter
+from deemsvc.sdk.dispatch import FableDispatcher
+from deemsvc.sdk.registry import ADAPTER_FACTORIES, AdapterContext, build_adapter
+
+
+def test_every_registered_factory_produces_an_agent_adapter():
+    for name in ADAPTER_FACTORIES:
+        adapter = build_adapter(name, AdapterContext(client=object(), run_root="."))
+        assert isinstance(adapter, AgentAdapter)
+
+
+def test_unknown_name_raises_with_known_names_listed():
+    with pytest.raises(ValueError, match="claude-code-cli"):
+        build_adapter("nonexistent", AdapterContext())
+
+
+def test_fable5_native_passes_through_client_and_run_root():
+    ctx = AdapterContext(client="fake-client", run_root="/tmp/x")
+    adapter = build_adapter("fable5-native", ctx)
+    assert isinstance(adapter, FableDispatcher)
+    assert adapter.client == "fake-client"
+    assert adapter.run_root == "/tmp/x"
+
+
+def test_claude_code_cli_factory_ignores_the_client_field():
+    ctx = AdapterContext(client=None, run_root=".")
+    adapter = build_adapter("claude-code-cli", ctx)
+    assert isinstance(adapter, CliAgentAdapter)
+    assert adapter.spec.name == "claude-code-cli"
+    assert adapter.spec.argv[0] == "claude"
+
+
+def test_codex_cli_factory_produces_the_codex_spec():
+    adapter = build_adapter("codex-cli", AdapterContext())
+    assert isinstance(adapter, CliAgentAdapter)
+    assert adapter.spec.name == "codex-cli"
+    assert adapter.spec.argv[0] == "codex"
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cd deemsvc && .venv/bin/pytest tests/test_sdk_registry.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'deemsvc.sdk.registry'`
+
+- [ ] **Step 3: Implement the registry**
+
+`deemsvc/src/deemsvc/sdk/registry.py`:
+
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable
+
+from .adapter import AgentAdapter
+from .cli_adapter import CliAdapterSpec, CliAgentAdapter
+from .dispatch import FableDispatcher
+
+
+@dataclass
+class AdapterContext:
+    """Everything a concrete adapter factory might need. Individual factories
+    read only the fields they use — the CLI factories ignore `client` entirely,
+    since they authenticate however the installed CLI is already configured."""
+    client: object | None = None   # AsyncAnthropic — only fable5-native uses this
+    run_root: str = "."
+
+
+CLAUDE_CODE_CLI = CliAdapterSpec(
+    name="claude-code-cli",
+    argv=("claude", "-p", "--output-format", "stream-json"),
+    prompt_via="stdin",
+)
+CODEX_CLI = CliAdapterSpec(
+    name="codex-cli",
+    argv=("codex", "exec", "--json"),
+    prompt_via="arg",
+)
+
+ADAPTER_FACTORIES: dict[str, Callable[[AdapterContext], AgentAdapter]] = {
+    "fable5-native": lambda ctx: FableDispatcher(ctx.client, ctx.run_root),
+    "claude-code-cli": lambda ctx: CliAgentAdapter(CLAUDE_CODE_CLI),
+    "codex-cli": lambda ctx: CliAgentAdapter(CODEX_CLI),
+}
+
+
+def build_adapter(name: str, ctx: AdapterContext) -> AgentAdapter:
+    factory = ADAPTER_FACTORIES.get(name)
+    if factory is None:
+        raise ValueError(f"unknown agent adapter {name!r}. Known: {sorted(ADAPTER_FACTORIES)}")
+    return factory(ctx)
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `cd deemsvc && .venv/bin/pytest tests/test_sdk_registry.py -v`
+Expected: 5 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add deemsvc/src/deemsvc/sdk/registry.py deemsvc/tests/test_sdk_registry.py
+git commit -m "feat(deemsvc): add the adapter registry — select a backend by name"
+```
+
+---
+
+### Task 8: Route VerifierEngine's semantic review through build_request
 
 **Files:**
 - Modify: `deemsvc/src/deemsvc/verifier/engine.py`
@@ -794,14 +1263,14 @@ git commit -m "feat(deemsvc): add FableDispatcher tool-use loop, tested against 
 
 **Interfaces:**
 - Consumes: `build_request` from Task 1.
-- Produces: no new public interface — `_semantic_review`'s signature and return shape are unchanged; only its internal request construction changes.
+- Produces: no new public interface — `_semantic_review`'s signature and return shape are unchanged; only its internal request construction changes. (This task is unaffected by Tasks 4-7's pluggability additions: the Verifier's semantic-review judge is always a fresh-context Anthropic call regardless of which adapter produced the candidate being judged — it judges a git diff, not an adapter.)
 
 - [ ] **Step 1: Update the semantic-review test to assert the fallback chain is present**
 
 Add this test to `deemsvc/tests/test_verifier_semantic_review.py` (keep the existing
 `pytestmark` skip guard and fixture; this test additionally requires
 `ANTHROPIC_API_KEY` and inspects the outgoing request via monkeypatching the client's
-`messages.create`):
+`beta.messages.create`):
 
 ```python
 @pytest.mark.asyncio
@@ -901,7 +1370,7 @@ acceptable.
 - [ ] **Step 5: Run the full deemsvc test suite**
 
 Run: `cd deemsvc && .venv/bin/pytest -v`
-Expected: every test across all four plans built so far passes together (110+ tests,
+Expected: every test across all four plans built so far passes together (130+ tests,
 0 failures, live-API tests skipped unless `ANTHROPIC_API_KEY` is set).
 
 - [ ] **Step 6: Commit**

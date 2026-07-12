@@ -3,22 +3,25 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Expose the `deemsvc` Python engine (orchestrator + tool broker + verifier +
-Fable 5 dispatcher, built in the four prior plans) over HTTP/SSE, and wire Deem's
+pluggable agent adapters, built in the four prior plans) over HTTP/SSE, and wire Deem's
 existing Node/Express shell to spawn, supervise, and consume it — landing a new
-**"Fable 5 (native)"** agent option that runs real tasks end to end without touching
-any existing UI, auth, store, or Electron code.
+**agent-selectable run path** (`fable5-native`, `claude-code-cli`, `codex-cli`, or any
+future adapter registered in `deemsvc-fable5-dispatcher`'s registry) that runs real
+tasks end to end without touching any existing UI, auth, store, or Electron code.
 
 **Architecture:** A `GenerateThenVerifyDispatcher` closes the one architectural gap
-left open by the prior plans: it composes `FableDispatcher` (proposes a candidate) with
-`VerifierEngine` (arbitrates it), so the Orchestrator's `dispatch` callable never treats
-a generator's self-report as authoritative — matching
-`docs/AI-CODING-AGENT-ARCHITECTURAL-BLUEPRINT.md` §8.5's closing invariant. A FastAPI
-app wraps `Orchestrator.run()` in `POST /runs` / `GET /runs/{id}/events` (SSE) /
-`POST /runs/{id}/resume` / `GET /runs/{id}/state` / `GET /health`. On the Node side, a
-supervisor spawns `deemsvc` as a managed child process (mirroring the `spawn()` pattern
-already used in `server/agents/claude.js`/`codex.js`), a client talks to it over HTTP,
-and a projector maps its SSE journal events onto the existing `data/deem.json` shape via
-`store.js` — per `docs/specs/2026-07-12-fable5-engine-rebuild-design.md` §2 and §4.
+left open by the prior plans: it composes *whichever* `AgentAdapter` a run selects
+(proposes a candidate) with `VerifierEngine` (arbitrates it), so the Orchestrator's
+`dispatch` callable never treats an agent's self-report as authoritative — matching
+`docs/AI-CODING-AGENT-ARCHITECTURAL-BLUEPRINT.md` §8.5's closing invariant, and holding
+uniformly whether the candidate came from the Anthropic API or a CLI subprocess. A
+FastAPI app wraps `Orchestrator.run()` in `POST /runs` (which accepts an `agent` field
+selecting the adapter by name) / `GET /runs/{id}/events` (SSE) / `POST /runs/{id}/resume`
+/ `GET /runs/{id}/state` / `GET /health`. On the Node side, a supervisor spawns `deemsvc`
+as a managed child process (mirroring the `spawn()` pattern already used in
+`server/agents/claude.js`/`codex.js`), a client talks to it over HTTP, and a projector
+maps its SSE journal events onto the existing `data/deem.json` shape via `store.js` —
+per `docs/specs/2026-07-12-fable5-engine-rebuild-design.md` §2 and §4.
 
 **Tech Stack:** Python: `fastapi`, `uvicorn[standard]`, `httpx` (test client). Node:
 built-in `node:child_process` and `node:http`/`node:https` only — no new npm
@@ -38,8 +41,8 @@ dependencies, matching the existing minimal-dependency footprint in `package.jso
 - **Also deferred, follow-on plans:** `task.heartbeat` messages (blueprint §4.1) — this
   plan's debug-view data comes entirely from journal transitions, not live heartbeats,
   so tool-call-in-progress granularity is coarser than the spec's component-mapping
-  table (§3) describes until a follow-up plan adds heartbeat emission to
-  `FableDispatcher` and a corresponding `server/monitor.js` consumer; and the
+  table (§3) describes until a follow-up plan adds heartbeat emission to each
+  `AgentAdapter` and a corresponding `server/monitor.js` consumer; and the
   evidence-bundle audit writer (blueprint §6 Stage 4, spec §3's `audit.js` row) — this
   plan's `server/audit.js` is untouched, so Fable-5-native runs are not yet audited the
   way Claude/Codex runs are. Both are real gaps against the full blueprint, called out
@@ -67,8 +70,8 @@ dependencies, matching the existing minimal-dependency footprint in `package.jso
 - Create: `deemsvc/tests/test_service_dispatch_compose.py`
 
 **Interfaces:**
-- Consumes: `Step`, `StepResult`, `Intent`, `TokenBudget` from `deemsvc-orchestrator-core`; `VerificationTask`, `Verdict`, `VerifierEngine` from `deemsvc-verifier-engine`; `FableDispatcher` from `deemsvc-fable5-dispatcher`.
-- Produces: `GenerateThenVerifyDispatcher` (class: `__init__(fable, verifier_factory: Callable[[str], VerifierEngine], intent: Intent, budget: TokenBudget)`; `async def __call__(step: Step) -> StepResult`).
+- Consumes: `Step`, `StepResult`, `Intent`, `TokenBudget` from `deemsvc-orchestrator-core`; `VerificationTask`, `Verdict`, `VerifierEngine` from `deemsvc-verifier-engine`; `AgentAdapter` from `deemsvc-fable5-dispatcher` (any concrete implementation — `FableDispatcher`, `CliAgentAdapter`, or a future backend — composes identically here).
+- Produces: `GenerateThenVerifyDispatcher` (class: `__init__(agent: AgentAdapter, verifier_factory: Callable[[str], VerifierEngine], intent: Intent, budget: TokenBudget)`; `async def __call__(step: Step) -> StepResult`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -98,12 +101,14 @@ def _step(step_class="generate", **overrides) -> Step:
 
 @pytest.mark.asyncio
 async def test_verifier_pass_becomes_step_result_pass():
-    fable = AsyncMock(return_value=StepResult(
+    # AsyncMock stands in for any AgentAdapter — FableDispatcher, CliAgentAdapter,
+    # or a future backend — since GenerateThenVerifyDispatcher only calls it.
+    agent = AsyncMock(return_value=StepResult(
         "impl", "pass", 1000, {"candidate_ref": "a" * 40}))
     verifier = AsyncMock()
     verifier.verify = AsyncMock(return_value=Verdict("pass", "sig1"))
     dispatcher = GenerateThenVerifyDispatcher(
-        fable, verifier_factory=lambda repo_root: verifier,
+        agent, verifier_factory=lambda repo_root: verifier,
         intent=_intent(), budget=TokenBudget(ceiling=1_000_000))
 
     result = await dispatcher(_step())
@@ -113,13 +118,13 @@ async def test_verifier_pass_becomes_step_result_pass():
 
 @pytest.mark.asyncio
 async def test_verifier_retry_carries_feedback_into_the_step_result():
-    fable = AsyncMock(return_value=StepResult(
+    agent = AsyncMock(return_value=StepResult(
         "impl", "pass", 1000, {"candidate_ref": "b" * 40}))
     verifier = AsyncMock()
     feedback = {"instruction": "fix only the regression"}
     verifier.verify = AsyncMock(return_value=Verdict("retry", "sig2", feedback=feedback))
     dispatcher = GenerateThenVerifyDispatcher(
-        fable, verifier_factory=lambda repo_root: verifier,
+        agent, verifier_factory=lambda repo_root: verifier,
         intent=_intent(), budget=TokenBudget(ceiling=1_000_000))
 
     result = await dispatcher(_step())
@@ -128,15 +133,15 @@ async def test_verifier_retry_carries_feedback_into_the_step_result():
 
 
 @pytest.mark.asyncio
-async def test_generator_self_reported_pass_is_never_trusted_without_verification():
-    # Even though FableDispatcher proposes "pass", the Verifier's "escalate"
-    # must be what the Orchestrator sees.
-    fable = AsyncMock(return_value=StepResult(
+async def test_agent_self_reported_pass_is_never_trusted_without_verification():
+    # Even though the agent proposes "pass" — whatever backend it is — the
+    # Verifier's "escalate" must be what the Orchestrator sees.
+    agent = AsyncMock(return_value=StepResult(
         "impl", "pass", 1000, {"candidate_ref": "c" * 40}))
     verifier = AsyncMock()
     verifier.verify = AsyncMock(return_value=Verdict("escalate", "sig3", reason="attempt ceiling"))
     dispatcher = GenerateThenVerifyDispatcher(
-        fable, verifier_factory=lambda repo_root: verifier,
+        agent, verifier_factory=lambda repo_root: verifier,
         intent=_intent(), budget=TokenBudget(ceiling=1_000_000))
 
     result = await dispatcher(_step())
@@ -144,13 +149,13 @@ async def test_generator_self_reported_pass_is_never_trusted_without_verificatio
 
 
 @pytest.mark.asyncio
-async def test_a_proposed_retry_from_the_generator_skips_verification_entirely():
-    # If the Generator itself never produced a candidate_ref, there is nothing
-    # for the Verifier to check — don't spend a verification cycle on it.
-    fable = AsyncMock(return_value=StepResult("impl", "retry", 500, {"candidate_ref": ""}))
+async def test_a_proposed_retry_from_the_agent_skips_verification_entirely():
+    # If the agent itself never produced a candidate_ref, there is nothing for
+    # the Verifier to check — don't spend a verification cycle on it.
+    agent = AsyncMock(return_value=StepResult("impl", "retry", 500, {"candidate_ref": ""}))
     verifier = AsyncMock()
     dispatcher = GenerateThenVerifyDispatcher(
-        fable, verifier_factory=lambda repo_root: verifier,
+        agent, verifier_factory=lambda repo_root: verifier,
         intent=_intent(), budget=TokenBudget(ceiling=1_000_000))
 
     result = await dispatcher(_step())
@@ -160,10 +165,10 @@ async def test_a_proposed_retry_from_the_generator_skips_verification_entirely()
 
 @pytest.mark.asyncio
 async def test_non_generate_steps_bypass_verification_entirely():
-    fable = AsyncMock(return_value=StepResult("explore", "pass", 200, {}))
+    agent = AsyncMock(return_value=StepResult("explore", "pass", 200, {}))
     verifier = AsyncMock()
     dispatcher = GenerateThenVerifyDispatcher(
-        fable, verifier_factory=lambda repo_root: verifier,
+        agent, verifier_factory=lambda repo_root: verifier,
         intent=_intent(), budget=TokenBudget(ceiling=1_000_000))
 
     result = await dispatcher(_step(step_class="explore"))
@@ -185,29 +190,31 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'deemsvc.service'`
 ```python
 from __future__ import annotations
 
-from typing import Callable
-
 from deemsvc.orchestrator.state import Intent, Step, StepResult, TokenBudget
+from deemsvc.sdk.adapter import AgentAdapter
 from deemsvc.verifier.engine import VerificationTask, VerifierEngine
+from typing import Callable
 
 
 class GenerateThenVerifyDispatcher:
-    """Composes the Generator (FableDispatcher) with the Verifier so a generator's
-    self-reported "pass" is never authoritative. Only "generate"-class steps that
-    produced a real candidate_ref are routed to verification; every other step
-    class, and any generate attempt that never committed anything, passes through
-    the Generator's own proposed verdict unchanged."""
+    """Composes any AgentAdapter (FableDispatcher, CliAgentAdapter, or a future
+    backend — see deemsvc-fable5-dispatcher's registry.py) with the Verifier so
+    an agent's self-reported "pass" is never authoritative, regardless of which
+    backend produced it. Only "generate"-class steps that produced a real
+    candidate_ref are routed to verification; every other step class, and any
+    generate attempt that never committed anything, passes through the agent's
+    own proposed verdict unchanged."""
 
-    def __init__(self, fable: Callable[[Step], "StepResult"],
+    def __init__(self, agent: AgentAdapter,
                  verifier_factory: Callable[[str], VerifierEngine],
                  intent: Intent, budget: TokenBudget):
-        self.fable = fable
+        self.agent = agent
         self.verifier_factory = verifier_factory
         self.intent = intent
         self.budget = budget
 
     async def __call__(self, step: Step) -> StepResult:
-        proposed = await self.fable(step)
+        proposed = await self.agent(step)
         candidate_ref = proposed.evidence.get("candidate_ref") if proposed.evidence else None
         if step.step_class != "generate" or proposed.verdict != "pass" or not candidate_ref:
             return proposed
@@ -320,6 +327,7 @@ class RunEntry:
     graph: dict[str, Step]
     task: asyncio.Task | None
     journal: JsonlJournal
+    agent: str = "fable5-native"        # which AgentAdapter this run uses — resume reuses it
     subscribers: set[asyncio.Queue] = field(default_factory=set)
 
 
@@ -327,8 +335,9 @@ class RunRegistry:
     def __init__(self):
         self._runs: dict[str, RunEntry] = {}
 
-    def create(self, run_id: str, graph: dict[str, Step], journal: JsonlJournal) -> RunEntry:
-        entry = RunEntry(run_id=run_id, graph=graph, task=None, journal=journal)
+    def create(self, run_id: str, graph: dict[str, Step], journal: JsonlJournal,
+              agent: str = "fable5-native") -> RunEntry:
+        entry = RunEntry(run_id=run_id, graph=graph, task=None, journal=journal, agent=agent)
         self._runs[run_id] = entry
         return entry
 
@@ -395,7 +404,7 @@ git commit -m "feat(deemsvc): add FastAPI app skeleton with a run registry and /
 
 **Interfaces:**
 - Consumes: `RunRegistry`, `Intent`, `TokenBudget`, `Step`, `Orchestrator`, `JsonlJournal` from prior plans/tasks.
-- Produces: `POST /runs` (request body: `{"goal": str, "acceptance_criteria": [str], "baseline_ref": str, "worktree": str, "token_ceiling": int, "max_attempts": int}` → `{"run_id": str}`). `app.state.dispatcher_factory: Callable[[Intent, TokenBudget], Callable[[Step], Awaitable[StepResult]]]`, overridable per-test so `/runs` never calls the real Anthropic API in this test suite.
+- Produces: `POST /runs` (request body: `{"goal": str, "acceptance_criteria": [str], "baseline_ref": str, "worktree": str, "token_ceiling": int, "max_attempts": int, "agent": str}` → `{"run_id": str}`; `agent` selects a backend by name from `deemsvc-fable5-dispatcher`'s adapter registry, default `"fable5-native"`). `app.state.dispatcher_factory: Callable[[Intent, TokenBudget, str], Callable[[Step], Awaitable[StepResult]]]` (the third argument is the agent name), overridable per-test so `/runs` never calls the real Anthropic API in this test suite.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -414,7 +423,7 @@ from deemsvc.service.app import app
 @pytest.fixture(autouse=True)
 def stub_dispatcher_factory():
     original = app.state.dispatcher_factory
-    app.state.dispatcher_factory = lambda intent, budget: ScriptedDispatcher()
+    app.state.dispatcher_factory = lambda intent, budget, agent_name: ScriptedDispatcher()
     yield
     app.state.dispatcher_factory = original
 
@@ -435,8 +444,23 @@ async def test_post_runs_returns_a_run_id(tmp_path):
 
     entry = app.state.registry.get(run_id)
     assert entry is not None
+    assert entry.agent == "fable5-native"  # the default when the request omits it
     await asyncio.wait_for(entry.task, timeout=5)
     assert entry.graph["impl"].status.value == "passed"
+
+
+@pytest.mark.asyncio
+async def test_post_runs_honors_an_explicit_agent_choice(tmp_path):
+    transport = ASGITransport(app=app)
+    app.state.data_dir = str(tmp_path)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/runs", json={
+            "goal": "add a flag", "acceptance_criteria": ["AC-1"],
+            "baseline_ref": "0" * 40, "worktree": str(tmp_path / "wt"),
+            "token_ceiling": 100_000, "max_attempts": 3, "agent": "codex-cli",
+        })
+    run_id = resp.json()["run_id"]
+    assert app.state.registry.get(run_id).agent == "codex-cli"
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -467,21 +491,24 @@ class StartRunRequest(BaseModel):
     worktree: str
     token_ceiling: int = 500_000
     max_attempts: int = 4
+    agent: str = "fable5-native"    # any name in deemsvc.sdk.registry.ADAPTER_FACTORIES
 
 
-def _default_dispatcher_factory(intent: Intent, budget: TokenBudget):
-    """Production factory — real Fable 5 + Verifier. Overridden in tests via
-    app.state.dispatcher_factory so the test suite never calls the Anthropic API."""
+def _default_dispatcher_factory(intent: Intent, budget: TokenBudget, agent_name: str):
+    """Production factory — builds whichever AgentAdapter `agent_name` selects
+    (see deemsvc-fable5-dispatcher's registry.py), composed with the Verifier.
+    Overridden in tests via app.state.dispatcher_factory so the test suite never
+    calls the Anthropic API or spawns a real CLI."""
     from anthropic import AsyncAnthropic
 
-    from deemsvc.sdk.dispatch import FableDispatcher
+    from deemsvc.sdk.registry import AdapterContext, build_adapter
     from deemsvc.service.dispatch import GenerateThenVerifyDispatcher
     from deemsvc.verifier.engine import VerifierEngine
 
     client = AsyncAnthropic()
-    fable = FableDispatcher(client, run_root=".")
+    agent = build_adapter(agent_name, AdapterContext(client=client, run_root="."))
     return GenerateThenVerifyDispatcher(
-        fable, verifier_factory=lambda repo_root: VerifierEngine(repo_root, client=client),
+        agent, verifier_factory=lambda repo_root: VerifierEngine(repo_root, client=client),
         intent=intent, budget=budget,
     )
 
@@ -505,13 +532,13 @@ async def start_run(req: StartRunRequest) -> dict:
 
     journal_path = os.path.join(app.state.data_dir, run_id, "journal.jsonl")
     journal = JsonlJournal(journal_path)
-    entry = app.state.registry.create(run_id, graph, journal)
+    entry = app.state.registry.create(run_id, graph, journal, agent=req.agent)
 
     def journal_and_publish(record: dict) -> None:
         journal.append(record)
         app.state.registry.publish(run_id, record)
 
-    dispatch = app.state.dispatcher_factory(intent, budget)
+    dispatch = app.state.dispatcher_factory(intent, budget, req.agent)
     orchestrator = Orchestrator(intent, budget, dispatch, journal_and_publish)
     entry.task = asyncio.create_task(orchestrator.run(graph))
     return {"run_id": run_id}
@@ -559,7 +586,7 @@ from deemsvc.service.app import app
 @pytest.fixture(autouse=True)
 def stub_dispatcher_factory():
     original = app.state.dispatcher_factory
-    app.state.dispatcher_factory = lambda intent, budget: ScriptedDispatcher()
+    app.state.dispatcher_factory = lambda intent, budget, agent_name: ScriptedDispatcher()
     yield
     app.state.dispatcher_factory = original
 
@@ -684,7 +711,7 @@ from deemsvc.service.app import app
 def stub_dispatcher_factory():
     # Always escalates on the first attempt so /resume has something to act on.
     original = app.state.dispatcher_factory
-    app.state.dispatcher_factory = lambda intent, budget: ScriptedDispatcher(
+    app.state.dispatcher_factory = lambda intent, budget, agent_name: ScriptedDispatcher(
         script={"impl": ["escalate"]})
     yield
     app.state.dispatcher_factory = original
@@ -708,7 +735,7 @@ async def test_state_reflects_escalation_and_resume_reruns_to_completion(tmp_pat
 
         # Swap the script so the next dispatch passes, then resume.
         entry.graph["impl"].payload = entry.graph["impl"].payload  # no-op, for clarity
-        app.state.dispatcher_factory = lambda intent, budget: ScriptedDispatcher()
+        app.state.dispatcher_factory = lambda intent, budget, agent_name: ScriptedDispatcher()
         resume = await client.post(f"/runs/{run_id}/resume", json={"step_id": "impl"})
         assert resume.status_code == 200
 
@@ -769,7 +796,9 @@ async def resume_run(run_id: str, req: ResumeRequest) -> dict:
     intent = Intent(goal="resumed", acceptance_criteria=(), protected_paths=(),
                     forbidden_actions=(), baseline_ref="0" * 40)
     budget = TokenBudget(ceiling=500_000)
-    dispatch = app.state.dispatcher_factory(intent, budget)
+    # Reuse the same agent the run was started with — a resumed escalation
+    # shouldn't silently switch backends underneath the operator.
+    dispatch = app.state.dispatcher_factory(intent, budget, entry.agent)
 
     def journal_and_publish(record: dict) -> None:
         entry.journal.append(record)
@@ -1167,7 +1196,7 @@ git commit -m "feat(server): project deemsvc journal events onto the execution p
 
 ---
 
-### Task 8: Wire into server boot, add the "Fable 5 (native)" agent option, manual verification
+### Task 8: Wire into server boot, add the deemsvc-backed agent options, manual verification
 
 **Files:**
 - Modify: `server/index.js:1-32`
@@ -1179,11 +1208,19 @@ git commit -m "feat(server): project deemsvc journal events onto the execution p
 - Consumes: `startDeemsvc` (Task 6), `streamEvents`/`startRun`/`getState`/`resumeStep` (Task 6), `projectEvent` (Task 7).
 - Produces: no new exported interface — this task is pure wiring plus a UI addition, verified manually since it spans a live dev server and a browser.
 
-- [ ] **Step 1: Add the agent label**
+**Naming note:** deemsvc's registry (`deemsvc-fable5-dispatcher` Task 7) names its
+adapters `fable5-native`, `claude-code-cli`, `codex-cli`. These are deliberately
+distinct from the existing `claude-code`/`codex` values already used by
+`server/agents/{claude,codex}.js` (the old `workflow.js`-backed engine) — same
+underlying CLI tools, two different execution paths during the shadow-run period.
+A project's `agent` field, whichever value it holds, is what's forwarded verbatim as
+`POST /runs`' `agent` field; no per-agent branching lives in Node.
 
-In `server/agents/index.js`, add a new entry to the existing `AGENT_LABELS` map (the
-route-independent adapters map, `AGENTS`, is intentionally left untouched — the new
-engine is dispatched through deemsvc, not through `getAgent()`):
+- [ ] **Step 1: Add the agent labels**
+
+In `server/agents/index.js`, add three new entries to the existing `AGENT_LABELS` map
+(the route-independent adapters map, `AGENTS`, is intentionally left untouched — none
+of the three new engine options are dispatched through `getAgent()`):
 
 ```js
 export const AGENT_LABELS = {
@@ -1191,7 +1228,14 @@ export const AGENT_LABELS = {
   'claude-code': 'CLAUDE CODE',
   codex: 'CODEX',
   'fable5-native': 'FABLE 5 (NATIVE)',
+  'claude-code-cli': 'CLAUDE CODE (DEEMSVC)',
+  'codex-cli': 'CODEX (DEEMSVC)',
 };
+
+// Every value the "Fable 5 (native)" project setting can take routes through
+// deemsvc's POST /runs `agent` field unchanged — see server/index.js's
+// /api/tasks/:id/run-deemsvc route.
+export const DEEMSVC_AGENTS = new Set(['fable5-native', 'claude-code-cli', 'codex-cli']);
 ```
 
 - [ ] **Step 2: Boot deemsvc alongside the API server**
@@ -1203,6 +1247,7 @@ In `server/index.js`, add the import (after the existing `telegram.js` import on
 import { startDeemsvc } from './deemsvc-supervisor.js';
 import { startRun, streamEvents, getState, resumeStep } from './deemsvc-client.js';
 import { projectEvent } from './deemsvc-projector.js';
+import { DEEMSVC_AGENTS } from './agents/index.js';
 ```
 
 ```js
@@ -1211,23 +1256,26 @@ try {
   deemsvc = await startDeemsvc({ port: 8731 });
   console.log(`[deemsvc] ready at ${deemsvc.baseUrl}`);
 } catch (err) {
-  console.error(`[deemsvc] failed to start — the "Fable 5 (native)" agent option will error until this is fixed: ${err.message}`);
+  console.error(`[deemsvc] failed to start — deemsvc-backed agent options will error until this is fixed: ${err.message}`);
 }
 ```
 
-- [ ] **Step 3: Add a route to start a Fable 5 (native) task run**
+- [ ] **Step 3: Add a route to start a deemsvc-backed task run for any registered agent**
 
 Add to `server/index.js`, near the other task-mutating routes (this plan does not
 replicate the full `/api/tasks/:id/start`-style routing already used by
 `workflow.js`-backed tasks — it adds a parallel, minimal route scoped to this plan's
-single-step graph):
+single-step graph, generic over which deemsvc agent the project selected):
 
 ```js
-app.post('/api/tasks/:id/run-fable5', async (req, res) => {
+app.post('/api/tasks/:id/run-deemsvc', async (req, res) => {
   if (!deemsvc) return res.status(503).json({ error: 'deemsvc is not running' });
   const t = findTask(req.params.id);
   if (!t) return res.status(404).json({ error: 'task not found' });
   const p = findProject(t.projectId);
+  if (!DEEMSVC_AGENTS.has(p.agent)) {
+    return res.status(400).json({ error: `project agent "${p.agent}" is not a deemsvc backend` });
+  }
 
   const { run_id } = await startRun(deemsvc.baseUrl, {
     goal: t.description,
@@ -1236,24 +1284,25 @@ app.post('/api/tasks/:id/run-fable5', async (req, res) => {
     worktree: req.body.worktreePath,
     token_ceiling: state().settings.defaultTokenBudget,
     max_attempts: 4,
+    agent: p.agent,
   });
 
   streamEvents(deemsvc.baseUrl, run_id, (record) => projectEvent(t.id, record));
   res.json({ runId: run_id });
 });
 
-app.get('/api/tasks/:id/fable5-state/:runId', async (req, res) => {
+app.get('/api/tasks/:id/deemsvc-state/:runId', async (req, res) => {
   if (!deemsvc) return res.status(503).json({ error: 'deemsvc is not running' });
   res.json(await getState(deemsvc.baseUrl, req.params.runId));
 });
 
-app.post('/api/tasks/:id/fable5-resume/:runId', async (req, res) => {
+app.post('/api/tasks/:id/deemsvc-resume/:runId', async (req, res) => {
   if (!deemsvc) return res.status(503).json({ error: 'deemsvc is not running' });
   res.json(await resumeStep(deemsvc.baseUrl, req.params.runId, req.body.stepId));
 });
 ```
 
-- [ ] **Step 4: Add the agent option to project settings**
+- [ ] **Step 4: Add the agent options to project settings**
 
 In `web/src/pages/Project.jsx`, extend the `<select>` at lines 139-143:
 
@@ -1263,6 +1312,8 @@ In `web/src/pages/Project.jsx`, extend the `<select>` at lines 139-143:
   <option value="claude-code">Claude Code</option>
   <option value="codex">Codex</option>
   <option value="fable5-native">Fable 5 (native)</option>
+  <option value="claude-code-cli">Claude Code (deemsvc)</option>
+  <option value="codex-cli">Codex (deemsvc)</option>
 </select>
 ```
 
@@ -1282,7 +1333,7 @@ In a browser (or via the preview tools if available in this environment):
 4. With `ANTHROPIC_API_KEY` set in the environment, use `curl` to exercise the new
    route end to end against a scratch git repo:
    ```bash
-   curl -s -X POST http://localhost:4501/api/tasks/<taskId>/run-fable5 \
+   curl -s -X POST http://localhost:4501/api/tasks/<taskId>/run-deemsvc \
      -H 'Content-Type: application/json' \
      -H "Cookie: $(cat /tmp/deem-session-cookie)" \
      -d '{"baselineRef": "<sha>", "worktreePath": "/path/to/a/throwaway/worktree"}'
@@ -1290,6 +1341,14 @@ In a browser (or via the preview tools if available in this environment):
    and confirm a `runId` comes back, and that the task's Execution tab in the browser
    updates to "running" and eventually "passed" or "failed" without a page reload
    (the SSE relay through `projectEvent` should make this visible live).
+5. Repeat step 4 with the project's agent switched to **Claude Code (deemsvc)** and
+   then **Codex (deemsvc)** — these require the `claude`/`codex` CLIs installed and
+   authenticated on the host, same as the existing `claude-code`/`codex` options. The
+   route and request shape are identical; only `p.agent`'s value changes. Confirm each
+   selects the right adapter by checking the run's evidence in `GET
+   /api/tasks/:id/deemsvc-state/:runId` — the response's step evidence should show
+   `"cli": "claude-code-cli"` or `"cli": "codex-cli"` for those two, and no `cli` key
+   for `fable5-native`.
 
 - [ ] **Step 6: Document the platform gap and the new least-privilege model**
 
@@ -1299,19 +1358,23 @@ run with least privilege by default." and before point "4. Every claim is verifi
 — renumber the existing point 4 to point 5):
 
 ```markdown
-**4. Fable 5 (native) runs in a POSIX sandbox — macOS/Linux only.**
-The `deemsvc` engine confines every tool invocation with `setrlimit` (CPU, memory,
-file descriptors, file size) and kills timed-out processes by process group
+**4. deemsvc-backed agents run in a POSIX sandbox — macOS/Linux only.**
+Every deemsvc agent option (Fable 5 native, Claude Code (deemsvc), Codex (deemsvc))
+shares one tool broker that confines every tool invocation with `setrlimit` (CPU,
+memory, file descriptors, file size) and kills timed-out processes by process group
 (`SIGKILL` the whole group, not just the parent). This is enforced by the broker,
-not by agent instructions — a prompt cannot talk its way past it. It does not run
-on Windows: the `resource` module `deemsvc` depends on is POSIX-only. Windows
-support is a known gap, not yet built; use Mock, Claude Code, or Codex on Windows
-until it lands.
+not by agent instructions — a prompt cannot talk its way past it, and it applies
+uniformly whether the candidate came from the Anthropic API or a CLI subprocess. It
+does not run on Windows: the `resource` module `deemsvc` depends on is POSIX-only.
+Windows support is a known gap, not yet built; use the original Mock, Claude Code,
+or Codex options (not their "(deemsvc)" counterparts) on Windows until it lands. The
+"(deemsvc)" CLI options additionally require the `claude`/`codex` CLI installed and
+authenticated, same as their non-deemsvc counterparts — deemsvc doesn't bundle them.
 ```
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add server/index.js server/agents/index.js web/src/pages/Project.jsx docs/PRODUCTION.md
-git commit -m "feat: wire deemsvc into server boot and add the Fable 5 (native) agent option"
+git commit -m "feat: wire deemsvc into server boot and add the deemsvc-backed agent options"
 ```
