@@ -472,11 +472,16 @@ def test_memory_tool_is_included():
 
 - [ ] **Step 2: Add jsonschema as a dev dependency and run the test to verify it fails**
 
-Edit `deemsvc/pyproject.toml`'s `dev` optional dependencies:
+Edit `deemsvc/pyproject.toml`'s `dev` optional dependencies — **add** `jsonschema`,
+don't replace the list: `deemsvc-tool-broker`'s Task 4 already added `ruff>=0.4` to
+this same line, and overwriting it drops a dependency the ruff-json tool spec's own
+tests need on a fresh install (this exact regression happened during execution —
+caught only because `ruff` was still importable from an earlier, no-longer-declared
+install; see this task's own execution notes).
 
 ```toml
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "jsonschema>=4.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.4", "jsonschema>=4.0"]
 ```
 
 Run:
