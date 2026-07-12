@@ -385,6 +385,7 @@ class TokenBudget:
     _committed: int = 0
     _reservations: dict[str, int] = field(default_factory=dict)
     _ewma: dict[str, float] = field(default_factory=dict)
+    _fallbacks: dict[str, int] = field(default_factory=dict)
     _EWMA_ALPHA: float = 0.30
 
     def projected_cost(self, step_class: str, fallback: int) -> int:
@@ -401,17 +402,33 @@ class TokenBudget:
         if est > self.headroom():
             raise BudgetExhausted(needed=est, headroom=self.headroom())
         self._reservations[step_id] = est
+        if step_class not in self._fallbacks:
+            self._fallbacks[step_class] = fallback
         return est
 
     def commit(self, step_id: str, step_class: str, actual: int) -> None:
         self._reservations.pop(step_id, None)
         self._committed += actual
-        prev = self._ewma.get(step_class, float(actual))
+        if step_class not in self._ewma:
+            prev = float(self._fallbacks.get(step_class, actual))
+        else:
+            prev = self._ewma[step_class]
         self._ewma[step_class] = self._EWMA_ALPHA * actual + (1 - self._EWMA_ALPHA) * prev
 
     def release(self, step_id: str) -> None:
         self._reservations.pop(step_id, None)
 ```
+
+**Note (corrected after implementation):** the version above fixes a bug in this
+plan's original reference code — the original body computed `prev = self._ewma.get(step_class,
+float(actual))` on first commit, which seeds the EWMA at `actual` itself and makes
+the first commit a no-op on the running average (`0.3*actual + 0.7*actual == actual`,
+never `fallback`). That silently broke this task's own `test_commit_updates_ewma_for_future_projections`
+assertion (`ewma == 1300` for `fallback=1000, actual=2000`), since the original code
+produces `2000` instead. The `_fallbacks` dict captures each step class's fallback at
+first `reserve()`, so `commit()` can seed the EWMA from the fallback rather than from
+`actual` — preserving the `reserve`/`commit` signatures unchanged (no `fallback` param
+was added to `commit`) while making the documented `1300` result actually reachable.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
