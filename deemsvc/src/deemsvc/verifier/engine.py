@@ -174,3 +174,30 @@ class VerifierEngine:
         return Verdict("retry", sig, regressions, new_failing, flaky, lint,
                        semantic, feedback=feedback,
                        reason="novel failure signature — feedback-directed retry")
+
+    async def _bleach_flakes(self, cand_dir: str,
+                             regressions: list[TestDelta]) -> tuple[list[TestDelta], list[str]]:
+        """Rerun each regression K times in the candidate tree. Deterministic failure
+        stays a regression; any pass among reruns -> quarantine as flaky (logged, not
+        charged to the candidate, surfaced in the audit trail)."""
+        confirmed, flaky = [], []
+        broker = ToolBroker(cand_dir)
+        for delta in regressions:
+            # `delta.test_id` is in `_parse_junit`'s key format: a dotted module
+            # classname, "::", test name (e.g. "tests.test_suite::test_x"). That is
+            # NOT a valid pytest CLI selector -- pytest needs an actual file path
+            # ("tests/test_suite.py::test_x") and errors out (exit 4, "file or
+            # directory not found") on the dotted form, which the broker reports as
+            # TOOL_MISUSE with no "cases" key. See "Deviations from brief" in the
+            # Task 5 report.
+            classname, _, name = delta.test_id.rpartition("::")
+            selector = f"{classname.replace('.', '/')}.py::{name}"
+            outcomes = []
+            for _ in range(self.FLAKE_RERUNS):
+                out = await broker.invoke("pytest-junit", selector=selector)
+                outcomes.append(out.parsed["cases"].get(delta.test_id, "FAIL:missing"))
+            if all(o.startswith("FAIL") for o in outcomes):
+                confirmed.append(delta)
+            else:
+                flaky.append(delta.test_id)
+        return confirmed, flaky
