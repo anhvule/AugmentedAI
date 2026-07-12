@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -42,3 +44,17 @@ class VerifierEngine:
         deltas.extend(TestDelta(tid, Transition.REMOVED)
                       for tid in before.keys() - after.keys())
         return deltas
+
+    @staticmethod
+    def _failure_signature(regressions: list[TestDelta], new_failing: list[TestDelta],
+                           unmet: list[str]) -> str:
+        """Stable hash of the failure *shape*. Trace heads are normalized (addresses,
+        line numbers, temp paths stripped) so cosmetically different reruns of the
+        same defect collide — that collision is the loop detector."""
+        norm = lambda s: re.sub(r"0x[0-9a-f]+|:\d+|/tmp/\S+", "·", s.lower())
+        basis = sorted(
+            [f"{d.test_id}|{d.kind}|{norm(d.trace_head)}"
+             for d in (*regressions, *new_failing)]
+            + [f"unmet|{c}" for c in sorted(unmet)]
+        )
+        return hashlib.sha256("\n".join(basis).encode()).hexdigest()[:16]
