@@ -5,6 +5,7 @@ import os
 import re
 import resource
 import signal
+import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from enum import StrEnum
@@ -109,10 +110,6 @@ def _confine(timeout_s: int) -> Callable[[], None]:
 class ToolBroker:
     def __init__(self, workdir: str):
         self.workdir = workdir
-        # Compute PYTHONPATH to include user site-packages for tools like pytest
-        # that are installed via --user in Python 3.9
-        user_site = os.path.expanduser("~/Library/Python/3.9/lib/python/site-packages")
-        pythonpath = user_site if os.path.exists(user_site) else ""
         self._env = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "HOME": workdir,
@@ -121,8 +118,6 @@ class ToolBroker:
             "GIT_TERMINAL_PROMPT": "0",
             "CI": "1",
         }
-        if pythonpath:
-            self._env["PYTHONPATH"] = pythonpath
 
     def _render(self, spec: ToolSpec, args: dict[str, str]) -> list[str]:
         argv: list[str] = []
@@ -136,6 +131,12 @@ class ToolBroker:
                 argv.append(value)
             else:
                 argv.append(token)
+        if argv and argv[0] == "python3":
+            # Resolve to the interpreter actually running this broker (guaranteed
+            # by pyproject's requires-python + the project's venv to have
+            # pytest/pytest-asyncio installed) rather than whatever "python3"
+            # happens to mean on the scrubbed subprocess PATH.
+            argv[0] = sys.executable
         return argv
 
     @staticmethod
