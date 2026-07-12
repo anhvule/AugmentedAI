@@ -78,18 +78,20 @@ class VerifierEngine:
         base = os.path.join(self.repo_root, ".deemsvc", f"wt-base-{task.step_id}")
         cand = os.path.join(self.repo_root, ".deemsvc", f"wt-cand-{task.step_id}")
         git = ToolBroker(self.repo_root)
-        for path, ref in ((base, task.baseline_ref), (cand, task.candidate_ref)):
-            out = await git.invoke("git", sub="worktree", a1="add",
-                                   a2="--detach", a3=path, a4=ref)
-            if out.kind is not OutcomeKind.TOOL_OK:
-                raise RuntimeError(f"worktree add failed: {out.stderr_tail}")
         try:
+            for path, ref in ((base, task.baseline_ref), (cand, task.candidate_ref)):
+                out = await git.invoke("git", sub="worktree", a1="add",
+                                       a2="--detach", a3=path, a4=ref)
+                if out.kind is not OutcomeKind.TOOL_OK:
+                    raise RuntimeError(f"worktree add failed: {out.stderr_tail}")
             yield base, cand
         finally:
             for path in (base, cand):
                 # No trailing "." — `git worktree remove --force <path>` takes exactly
-                # one path argument; the blueprint's reference call included a stray
-                # extra argument that this plan drops.
+                # one path argument; removing a path that was never created is a
+                # harmless no-op failure (broker returns a non-OK outcome we don't
+                # raise on) — always attempting both keeps cleanup correct even when
+                # only one of the two adds above succeeded before a later one failed.
                 await git.invoke("git", sub="worktree", a1="remove", a2="--force", a3=path)
 
     async def _snapshot(self, workdir: str, selector: str = "tests") -> dict[str, str]:

@@ -43,6 +43,32 @@ async def test_twin_worktrees_are_created_and_removed(repo_with_refs):
 
 
 @pytest.mark.asyncio
+async def test_first_worktree_is_cleaned_up_when_second_add_fails(repo_with_refs):
+    """Regression test: the creation loop must run inside the try/finally so a
+    failure on the SECOND `git worktree add` (candidate) still triggers cleanup
+    of the FIRST (baseline), which was already created on disk and registered
+    with git before the failure. Prior to the fix, this worktree leaked forever."""
+    repo_root, baseline, _candidate = repo_with_refs
+    engine = VerifierEngine(repo_root)
+    # An unresolvable ref makes the second `git worktree add` fail while the
+    # first (baseline) has already succeeded — exactly the partial-failure case.
+    task = _task(repo_root, baseline, "not-a-real-ref-xyz")
+    base_dir = str(__import__("pathlib").Path(repo_root) / ".deemsvc" / "wt-base-impl")
+
+    with pytest.raises(RuntimeError, match="worktree add failed"):
+        async with engine._twin_worktrees(task):
+            pytest.fail("should not reach the yield — candidate add must fail first")
+
+    result = subprocess.run(["git", "worktree", "list"], cwd=repo_root,
+                            capture_output=True, text=True)
+    assert base_dir not in result.stdout, (
+        "baseline worktree leaked after candidate add failed")
+    import os as _os
+    assert not _os.path.exists(base_dir), (
+        "baseline worktree directory leaked on disk after candidate add failed")
+
+
+@pytest.mark.asyncio
 async def test_snapshot_returns_the_expected_case_matrix(repo_with_refs):
     repo_root, baseline, candidate = repo_with_refs
     engine = VerifierEngine(repo_root)
