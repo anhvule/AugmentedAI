@@ -85,3 +85,17 @@ async def test_budget_exhaustion_escalates_instead_of_dispatching(intent):
     result = await orch.run(graph)
     assert result["a"].status is StepStatus.ESCALATED
     assert dispatcher.calls == []  # never dispatched — budget check happens first
+
+
+@pytest.mark.asyncio
+async def test_dependency_cycle_escalates_gracefully_instead_of_crashing(intent):
+    dispatcher = ScriptedDispatcher()
+    orch = Orchestrator(intent, TokenBudget(ceiling=100_000), dispatcher, lambda r: None)
+    graph = _graph(
+        Step(id="x", step_class="generate", payload={}, deps=frozenset({"y"})),
+        Step(id="y", step_class="generate", payload={}, deps=frozenset({"x"})),
+    )
+    result = await orch.run(graph)
+    assert result["x"].status is StepStatus.ESCALATED
+    assert result["y"].status is StepStatus.ESCALATED
+    assert dispatcher.calls == []  # neither step was ever dispatched

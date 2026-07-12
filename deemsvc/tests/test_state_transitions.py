@@ -5,8 +5,9 @@ def test_every_status_has_a_table_entry():
     assert set(_LEGAL.keys()) == set(StepStatus)
 
 
-def test_blocked_can_go_ready_or_abandoned_only():
-    assert _LEGAL[StepStatus.BLOCKED] == frozenset({StepStatus.READY, StepStatus.ABANDONED})
+def test_blocked_can_go_ready_escalated_or_abandoned():
+    assert _LEGAL[StepStatus.BLOCKED] == frozenset(
+        {StepStatus.READY, StepStatus.ESCALATED, StepStatus.ABANDONED})
 
 
 def test_terminal_states_have_no_outbound_edges():

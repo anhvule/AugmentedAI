@@ -22,7 +22,7 @@ class StepStatus(StrEnum):
 
 
 _LEGAL: dict[StepStatus, frozenset[StepStatus]] = {
-    StepStatus.BLOCKED:    frozenset({StepStatus.READY, StepStatus.ABANDONED}),
+    StepStatus.BLOCKED:    frozenset({StepStatus.READY, StepStatus.ESCALATED, StepStatus.ABANDONED}),
     # NOTE: ESCALATED was added here during Task 5. The orchestrator's frontier
     # scanner promotes BLOCKED -> READY before checking budget (READY means
     # "awaiting budget + slot", per the enum docstring); when the subsequent
