@@ -175,6 +175,38 @@ class VerifierEngine:
                        semantic, feedback=feedback,
                        reason="novel failure signature — feedback-directed retry")
 
+    def _selector_for(self, cand_dir: str, test_id: str) -> str:
+        """Convert a JUnit-style dotted `test_id` (`"pkg.mod::name"` for a top-level
+        function, or `"pkg.mod.TestClass::name"` for a test nested in a class) into a
+        valid pytest CLI node-id selector (`"pkg/mod.py::name"` or
+        `"pkg/mod.py::TestClass::name"`).
+
+        `_parse_junit`'s `classname` mixes two different things under one dot
+        separator: the module's file path, and -- for class-based tests -- the class
+        name nested inside that file. A blind dot-to-slash replacement can't tell
+        them apart and mis-splits class-based tests (e.g. turning
+        "tests.test_suite.TestFoo" into the nonexistent "tests/test_suite/TestFoo.py"
+        instead of the real "tests/test_suite.py" with "TestFoo" as a node-id
+        component). So instead we probe the filesystem: try the longest dotted
+        prefix of `classname` first (falling back to shorter prefixes) and take the
+        first one that is a real ".py" file under `cand_dir` -- that's the module;
+        any segments left over are `::`-joined node-id components (nested test
+        classes).
+        """
+        classname, _, name = test_id.rpartition("::")
+        segments = classname.split(".")
+        for n in range(len(segments), 0, -1):
+            candidate = os.path.join(*segments[:n]) + ".py"
+            if os.path.exists(os.path.join(cand_dir, candidate)):
+                return "::".join([candidate, *segments[n:], name])
+        # No dotted prefix resolved to a real file -- should not happen for real
+        # JUnit output (pytest only emits a classname for a module it just collected
+        # from disk), but a malformed or stale test_id must not crash the whole
+        # verification run. Fall back to the naive dot-to-slash conversion as a
+        # best-effort selector; if it's still wrong, the broker reports TOOL_MISUSE
+        # for just this one delta (handled below) rather than raising.
+        return f"{classname.replace('.', '/')}.py::{name}"
+
     async def _bleach_flakes(self, cand_dir: str,
                              regressions: list[TestDelta]) -> tuple[list[TestDelta], list[str]]:
         """Rerun each regression K times in the candidate tree. Deterministic failure
@@ -183,19 +215,15 @@ class VerifierEngine:
         confirmed, flaky = [], []
         broker = ToolBroker(cand_dir)
         for delta in regressions:
-            # `delta.test_id` is in `_parse_junit`'s key format: a dotted module
-            # classname, "::", test name (e.g. "tests.test_suite::test_x"). That is
-            # NOT a valid pytest CLI selector -- pytest needs an actual file path
-            # ("tests/test_suite.py::test_x") and errors out (exit 4, "file or
-            # directory not found") on the dotted form, which the broker reports as
-            # TOOL_MISUSE with no "cases" key. See "Deviations from brief" in the
-            # Task 5 report.
-            classname, _, name = delta.test_id.rpartition("::")
-            selector = f"{classname.replace('.', '/')}.py::{name}"
+            selector = self._selector_for(cand_dir, delta.test_id)
             outcomes = []
             for _ in range(self.FLAKE_RERUNS):
                 out = await broker.invoke("pytest-junit", selector=selector)
-                outcomes.append(out.parsed["cases"].get(delta.test_id, "FAIL:missing"))
+                # `.get("cases", {})` (not `["cases"]`): an unresolvable selector
+                # (e.g. from the fallback above) makes the broker return TOOL_MISUSE
+                # with an empty `parsed` dict -- treat that as a failed rerun instead
+                # of raising KeyError and crashing the whole verification run.
+                outcomes.append(out.parsed.get("cases", {}).get(delta.test_id, "FAIL:missing"))
             if all(o.startswith("FAIL") for o in outcomes):
                 confirmed.append(delta)
             else:

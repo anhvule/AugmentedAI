@@ -43,3 +43,40 @@ async def test_deterministic_regression_is_confirmed(flake_repo):
     confirmed, flaky = await engine._bleach_flakes(str(flake_repo), regressions)
     assert [d.test_id for d in confirmed] == ["test_flaky::test_deterministic_failure"]
     assert flaky == []
+
+
+@pytest.fixture
+def class_based_repo(tmp_path):
+    """A nested-package repo whose test module contains a `unittest.TestCase`-style
+    class. Pytest's JUnit XML emits a classname of "<dotted module>.TestFoo" for the
+    test inside it (e.g. "tests.test_suite.TestFoo::test_deterministic_failure") --
+    a naive dot-to-slash conversion would mangle this into the nonexistent
+    "tests/test_suite/TestFoo.py::test_deterministic_failure" instead of the real
+    "tests/test_suite.py::TestFoo::test_deterministic_failure"."""
+    dest = tmp_path / "class_based_repo"
+    (dest / "tests").mkdir(parents=True)
+    (dest / "pytest.ini").write_text("[pytest]\naddopts = -p no:cacheprovider\n")
+    (dest / "tests" / "__init__.py").write_text("")
+    (dest / "tests" / "test_suite.py").write_text(
+        "import unittest\n"
+        "class TestFoo(unittest.TestCase):\n"
+        "    def test_deterministic_failure(self):\n"
+        "        assert False\n"
+    )
+    return dest
+
+
+@pytest.mark.asyncio
+async def test_class_based_regression_selector_resolves_and_confirms(class_based_repo):
+    engine = VerifierEngine(str(class_based_repo))
+    test_id = "tests.test_suite.TestFoo::test_deterministic_failure"
+    # The selector conversion must not naively slash every dot -- the module lives at
+    # "tests/test_suite.py" and "TestFoo" is a node-id component within it, not a
+    # path segment.
+    assert engine._selector_for(str(class_based_repo), test_id) == (
+        "tests/test_suite.py::TestFoo::test_deterministic_failure"
+    )
+    regressions = [TestDelta(test_id, Transition.REGRESSION, "assert False")]
+    confirmed, flaky = await engine._bleach_flakes(str(class_based_repo), regressions)
+    assert [d.test_id for d in confirmed] == [test_id]
+    assert flaky == []
