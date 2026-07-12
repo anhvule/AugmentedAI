@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Literal
 
 
 class StepStatus(StrEnum):
@@ -109,3 +110,25 @@ class TokenBudget:
 
     def release(self, step_id: str) -> None:
         self._reservations.pop(step_id, None)
+
+
+@dataclass
+class Step:
+    id: str
+    step_class: str                     # "explore" | "generate" | "verify" | "integrate"
+    payload: dict
+    deps: frozenset[str]
+    status: StepStatus = StepStatus.BLOCKED
+    attempts: int = 0
+    max_attempts: int = 3
+    fallback_cost: int = 40_000
+    feedback: dict | None = None        # verifier feedback packet threaded into retries
+
+
+@dataclass
+class StepResult:
+    step_id: str
+    verdict: Literal["pass", "retry", "escalate"]
+    tokens_spent: int
+    evidence: dict                      # digests, junit transitions, exit codes
+    feedback: dict | None = None
