@@ -10,6 +10,7 @@ from enum import StrEnum
 from typing import AsyncIterator, Literal
 
 from deemsvc.sandbox.broker import OutcomeKind, ToolBroker
+from deemsvc.sdk.request import build_request
 
 
 class Transition(StrEnum):
@@ -261,44 +262,45 @@ class VerifierEngine:
         The Generator's conversation is structurally unreachable from here."""
         git = ToolBroker(self.repo_root)
         diff = await git.invoke("git", sub="diff", a1=task.baseline_ref, a2=task.candidate_ref)
-        response = await self.client.messages.create(
-            model="claude-fable-5",
-            max_tokens=16000,
-            output_config={
-                "effort": "high",
-                "format": {"type": "json_schema", "schema": {
+        schema = {
+            "type": "object",
+            "properties": {
+                "criteria": {"type": "array", "items": {
                     "type": "object",
                     "properties": {
-                        "criteria": {"type": "array", "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "string"},
-                                "met": {"type": "boolean"},
-                                "evidence": {"type": "string"},
-                            },
-                            "required": ["id", "met", "evidence"],
-                            "additionalProperties": False,
-                        }},
-                        "scope_creep": {"type": "boolean"},
-                        "notes": {"type": "string"},
+                        "id": {"type": "string"},
+                        "met": {"type": "boolean"},
+                        "evidence": {"type": "string"},
                     },
-                    "required": ["criteria", "scope_creep", "notes"],
+                    "required": ["id", "met", "evidence"],
                     "additionalProperties": False,
                 }},
+                "scope_creep": {"type": "boolean"},
+                "notes": {"type": "string"},
             },
-            system=("You are a verification judge. You receive a diff and acceptance "
-                    "criteria. Judge only what the evidence shows. You cannot see the "
-                    "author's reasoning, and you must not infer intent from it. "
-                    "Mark a criterion met only if the diff plus test evidence proves it."),
-            messages=[{"role": "user", "content": json.dumps({
-                "acceptance_criteria": task.acceptance_criteria,
-                "diff": diff.parsed.get("raw", "")[:150_000],
-                "test_transitions": [
-                    {"test_id": d.test_id, "kind": str(d.kind), "trace_head": d.trace_head}
-                    for d in deltas
-                ],
-            })}],
-        )
+            "required": ["criteria", "scope_creep", "notes"],
+            "additionalProperties": False,
+        }
+        system = [{"type": "text", "text": (
+            "You are a verification judge. You receive a diff and acceptance "
+            "criteria. Judge only what the evidence shows. You cannot see the "
+            "author's reasoning, and you must not infer intent from it. "
+            "Mark a criterion met only if the diff plus test evidence proves it."
+        )}]
+        messages = [{"role": "user", "content": json.dumps({
+            "acceptance_criteria": task.acceptance_criteria,
+            "diff": diff.parsed.get("raw", "")[:150_000],
+            "test_transitions": [
+                {"test_id": d.test_id, "kind": str(d.kind), "trace_head": d.trace_head}
+                for d in deltas
+            ],
+        })}]
+        kwargs, betas = build_request("verifier", system, messages, tools=[])
+        kwargs["output_config"]["format"] = {"type": "json_schema", "schema": schema}
+
+        # `betas` is only accepted on the `beta` namespace — matches
+        # FableDispatcher's `self.client.beta.messages.stream(betas=betas, ...)`.
+        response = await self.client.beta.messages.create(betas=betas, **kwargs)
         if response.stop_reason == "refusal":
             return {"criteria": [], "scope_creep": False,
                     "notes": "judge declined; mechanical evidence governs"}

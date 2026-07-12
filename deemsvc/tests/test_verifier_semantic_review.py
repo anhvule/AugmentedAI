@@ -49,3 +49,25 @@ async def test_semantic_review_returns_a_schema_shaped_verdict(repo_with_diff):
     assert isinstance(result["criteria"], list)
     assert "scope_creep" in result
     assert isinstance(result["scope_creep"], bool)
+
+
+@pytest.mark.asyncio
+async def test_semantic_review_request_carries_the_opus_fallback(repo_with_diff, monkeypatch):
+    from anthropic import AsyncAnthropic
+
+    repo_root, baseline, candidate = repo_with_diff
+    engine = VerifierEngine(repo_root, client=AsyncAnthropic())
+    task = VerificationTask(step_id="s", repo_root=repo_root, baseline_ref=baseline,
+                            candidate_ref=candidate, acceptance_criteria=(), attempt=1,
+                            max_attempts=3, prior_signatures=frozenset(), changed_paths=())
+
+    captured = {}
+    real_create = engine.client.beta.messages.create
+
+    async def spy(*args, **kwargs):
+        captured.update(kwargs)
+        return await real_create(*args, **kwargs)
+
+    monkeypatch.setattr(engine.client.beta.messages, "create", spy)
+    await engine._semantic_review(task, repo_root, deltas=[])
+    assert captured["fallbacks"] == [{"model": "claude-opus-4-8"}]
