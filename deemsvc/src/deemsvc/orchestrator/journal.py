@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 
-from .state import StepStatus
+from .state import Step, StepStatus
 
 
 class JsonlJournal:
@@ -38,3 +38,25 @@ class JsonlJournal:
                 rec = json.loads(line)
                 last[rec["step"]] = rec["to"]
         return {step_id: StepStatus(status) for step_id, status in last.items()}
+
+
+_INFLIGHT = frozenset({
+    StepStatus.DISPATCHED, StepStatus.EXECUTING, StepStatus.VERIFYING, StepStatus.RETRYING,
+})
+
+
+def resume_graph(graph: dict[str, Step], journal_path: str) -> None:
+    """Apply the last recorded status from `journal_path` onto `graph` in place.
+
+    Terminal statuses (PASSED, ABANDONED, ESCALATED) are restored as-is. In-flight
+    statuses are reset to BLOCKED rather than the blueprint's literal "re-enter READY":
+    resetting to BLOCKED and letting Orchestrator._frontier() recompute READY from
+    current dependency state is the only way to guarantee a step already missing a
+    passed dependency isn't dispatched again — the same safety Orchestrator.run()
+    already relies on for the ordinary (non-crash) frontier walk.
+    """
+    statuses = JsonlJournal.replay(journal_path)
+    for step_id, status in statuses.items():
+        if step_id not in graph:
+            continue
+        graph[step_id].status = StepStatus.BLOCKED if status in _INFLIGHT else status
