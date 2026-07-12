@@ -112,6 +112,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'deemsvc.sandbox'`
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Callable
@@ -195,8 +196,25 @@ class ToolBroker:
                 argv.append(value)
             else:
                 argv.append(token)
+        if argv and argv[0] == "python3":
+            argv[0] = sys.executable
         return argv
 ```
+
+**Note (corrected during Task 3's implementation):** the `if argv and argv[0] ==
+"python3": argv[0] = sys.executable` line was added after Task 3 (pytest-junit)
+exposed a real problem: `ToolBroker._env`'s deliberately scrubbed `PATH`
+(`/usr/local/bin:/usr/bin:/bin`) resolves a bare `"python3"` to the *system*
+interpreter, not `deemsvc/.venv`'s — a different Python from the one `pytest`/
+`pytest-asyncio` are installed into, so `pytest-junit` invocations failed with
+`ModuleNotFoundError`. An early fix attempt injected `PYTHONPATH` into `_env`
+pointing at a host user's personal site-packages — reviewed and rejected: it
+exposed every subprocess this broker ever spawns (not just pytest-junit) to
+~92 unrelated host packages, and only "worked" because of an undocumented,
+machine-specific `pip install --user` history that wouldn't exist on any other
+machine. Resolving the interpreter explicitly at `_render` time, scoped to the
+one literal `"python3"` token, fixes the root cause without touching `_env`/`PATH`
+or affecting any other tool (`git`'s argv doesn't start with `"python3"`).
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -543,15 +561,48 @@ Add to `REGISTRY` (in the same dict literal as `"git"`):
 Run: `cd deemsvc && .venv/bin/pytest tests/test_broker_pytest_junit.py -v`
 Expected: 2 passed
 
-Note: `classname` for a top-level test function in a single file is empty, hence the
-`"::test_passes"` id shape (matching the fixture's flat layout) — this is intentional
-and mirrors real pytest JUnit output for module-level test functions.
+**Note (corrected during implementation):** the tests above must key `parsed["cases"]`
+by `"test_sample::test_passes"` etc, not `"::test_passes"` — current pytest (verified
+against 8.4.2/9.1.1) populates JUnit `classname` with the module name for top-level
+test functions, not an empty string. Adjust `test_broker_pytest_junit.py`'s two test
+functions to match this key shape; `_parse_junit` itself needs no change.
 
-- [ ] **Step 5: Commit**
+**Note (corrected during implementation, sandbox-scrub fix — see also Task 1's `_render`
+note):** `pytest-junit`'s `argv` starts with a bare `"python3"`, which under
+`ToolBroker`'s scrubbed `PATH` resolves to the system interpreter, not
+`deemsvc/.venv`'s — the venv `pytest`/`pytest-asyncio` are actually installed into.
+This is what Task 1's `_render` fix (`argv[0] = sys.executable` when `argv[0] ==
+"python3"`) resolves; implement that fix as part of this task if it isn't already in
+place, rather than adding any workaround to `ToolBroker.__init__`/`_env`.
+
+- [ ] **Step 5: Exclude fixture data from top-level test collection**
+
+`deemsvc/tests/fixtures/pytest_repo/test_sample.py` is data — copied into a `tmp_path`
+and driven by `ToolBroker` as a subprocess, per the test above — not a real test. Left
+alone, `pytest -v`'s default `testpaths = ["tests"]` collects it directly too, and its
+intentionally-failing/skipped cases (`test_fails`, `test_skipped`) show up as permanent
+"1 failed, 1 skipped" noise in every full-suite run, training developers to ignore that
+signal instead of trusting it.
+
+Edit `deemsvc/pyproject.toml`'s `[tool.pytest.ini_options]`:
+
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+norecursedirs = ["fixtures", ".*", "build", "dist", "CVS", "_darcs", "{arch}", "*.egg", "venv", ".venv"]
+```
+
+Run: `cd deemsvc && .venv/bin/pytest -v`
+Expected: the fixture's `test_fails`/`test_skipped` no longer appear in the run;
+`test_broker_pytest_junit.py`'s two tests (which drive the fixture via `ToolBroker`,
+not via top-level collection) still pass.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add deemsvc/src/deemsvc/sandbox/broker.py deemsvc/tests/fixtures/pytest_repo/ \
-        deemsvc/tests/test_broker_pytest_junit.py
+        deemsvc/tests/test_broker_pytest_junit.py deemsvc/pyproject.toml
 git commit -m "feat(deemsvc): add pytest-junit tool spec with TASK_SIGNAL classification"
 ```
 
