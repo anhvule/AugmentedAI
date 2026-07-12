@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -253,3 +254,52 @@ class VerifierEngine:
             else:
                 flaky.append(delta.test_id)
         return confirmed, flaky
+
+    async def _semantic_review(self, task: VerificationTask,
+                               cand_dir: str, deltas: list[TestDelta]) -> dict:
+        """Fresh-context model call. Input = diff + criteria + mechanical evidence.
+        The Generator's conversation is structurally unreachable from here."""
+        git = ToolBroker(self.repo_root)
+        diff = await git.invoke("git", sub="diff", a1=task.baseline_ref, a2=task.candidate_ref)
+        response = await self.client.messages.create(
+            model="claude-fable-5",
+            max_tokens=16000,
+            output_config={
+                "effort": "high",
+                "format": {"type": "json_schema", "schema": {
+                    "type": "object",
+                    "properties": {
+                        "criteria": {"type": "array", "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "met": {"type": "boolean"},
+                                "evidence": {"type": "string"},
+                            },
+                            "required": ["id", "met", "evidence"],
+                            "additionalProperties": False,
+                        }},
+                        "scope_creep": {"type": "boolean"},
+                        "notes": {"type": "string"},
+                    },
+                    "required": ["criteria", "scope_creep", "notes"],
+                    "additionalProperties": False,
+                }},
+            },
+            system=("You are a verification judge. You receive a diff and acceptance "
+                    "criteria. Judge only what the evidence shows. You cannot see the "
+                    "author's reasoning, and you must not infer intent from it. "
+                    "Mark a criterion met only if the diff plus test evidence proves it."),
+            messages=[{"role": "user", "content": json.dumps({
+                "acceptance_criteria": task.acceptance_criteria,
+                "diff": diff.parsed.get("raw", "")[:150_000],
+                "test_transitions": [
+                    {"test_id": d.test_id, "kind": str(d.kind), "trace_head": d.trace_head}
+                    for d in deltas
+                ],
+            })}],
+        )
+        if response.stop_reason == "refusal":
+            return {"criteria": [], "scope_creep": False,
+                    "notes": "judge declined; mechanical evidence governs"}
+        return json.loads(response.content[-1].text)
