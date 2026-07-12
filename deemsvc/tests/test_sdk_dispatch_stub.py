@@ -68,14 +68,25 @@ def test_fable_dispatcher_satisfies_the_agent_adapter_protocol():
 
 @pytest.mark.asyncio
 async def test_dispatcher_returns_pass_with_real_head_sha_after_tool_use_then_end_turn(worktree):
-    # Turn 1: model uses send_to_user. Turn 2: model ends its turn.
+    # Turn 1: model uses send_to_user, and (simulating the server-executed
+    # text-editor tool committing a real change out-of-band) a new commit
+    # lands on the worktree. Turn 2: model ends its turn. candidate_ref must
+    # reflect that *moved* HEAD, not merely any pre-existing HEAD.
     client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(stream=None)))
     calls = [
         _FakeStreamCtx(_message(
             [_tool_use_block("t1", "send_to_user", {"message": "progress"})], "tool_use")),
         _FakeStreamCtx(_message([_text_block("done")], "end_turn")),
     ]
-    client.beta.messages.stream = lambda **kwargs: calls.pop(0)
+
+    def _stream(**kwargs):
+        if len(calls) == 2:  # first turn: simulate a real out-of-band commit
+            (worktree / "change.txt").write_text("edit\n")
+            subprocess.run(["git", "add", "-A"], cwd=worktree, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "candidate"], cwd=worktree, check=True)
+        return calls.pop(0)
+
+    client.beta.messages.stream = _stream
 
     dispatcher = FableDispatcher(client, str(worktree))
     step = _step(str(worktree))
@@ -85,6 +96,25 @@ async def test_dispatcher_returns_pass_with_real_head_sha_after_tool_use_then_en
     assert result.evidence["candidate_ref"]
     assert len(result.evidence["candidate_ref"]) == 40  # a real git SHA
     assert result.tokens_spent == (100 + 50) * 2  # two turns
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_retries_when_the_model_ends_its_turn_without_committing(worktree):
+    # The model ends its turn immediately — no tool_use, no commit. The
+    # worktree already has a prior commit (see the `worktree` fixture), so a
+    # bare post-run `git rev-parse HEAD` would still resolve to a real SHA.
+    # The dispatcher must recognize HEAD never moved and report "retry" with
+    # an empty candidate_ref, not misreport the stale HEAD as a pass.
+    client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(stream=None)))
+    client.beta.messages.stream = lambda **kwargs: _FakeStreamCtx(
+        _message([_text_block("nothing to do")], "end_turn"))
+
+    dispatcher = FableDispatcher(client, str(worktree))
+    step = _step(str(worktree))
+    result = await dispatcher(step)
+
+    assert result.verdict == "retry"
+    assert result.evidence["candidate_ref"] == ""
 
 
 @pytest.mark.asyncio

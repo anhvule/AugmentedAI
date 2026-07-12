@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from deemsvc.orchestrator.state import Step, StepResult
-from deemsvc.sandbox.broker import ToolBroker
+from deemsvc.sandbox.broker import OutcomeKind, ToolBroker
 from .memory import MemoryStore
 from .request import build_request
 
@@ -37,6 +37,14 @@ class FableDispatcher:
         grant = step.payload["capability_grant"]
         broker = ToolBroker(grant["worktree"])
         memory = MemoryStore(grant["worktree"])
+
+        # Baseline HEAD, captured before the model does any work: `git rev-parse
+        # HEAD` succeeds on any worktree that already has a commit, so a bare
+        # post-run rev-parse can't distinguish "the model committed a candidate"
+        # from "the model did nothing and HEAD is still whatever it was." Only a
+        # HEAD that *moved* counts as a candidate — mirrors CliAgentAdapter.
+        baseline = await broker.invoke("git", sub="rev-parse", a1="HEAD")
+        baseline_ref = baseline.parsed.get("stdout", "").strip() if baseline.kind is OutcomeKind.TOOL_OK else ""
 
         system = step.payload["system_blocks"]        # frozen persona + pinned criteria
         tools = step.payload["tools"]
@@ -85,8 +93,10 @@ class FableDispatcher:
             kwargs["messages"] = messages
 
         # Compute the candidate ref from git — never trust the model's claim.
+        # Only a HEAD that moved past the baseline counts as a real candidate.
         head = await broker.invoke("git", sub="rev-parse", a1="HEAD")
-        candidate_ref = head.parsed.get("stdout", "").strip()
+        current_ref = head.parsed.get("stdout", "").strip() if head.kind is OutcomeKind.TOOL_OK else ""
+        candidate_ref = current_ref if current_ref and current_ref != baseline_ref else ""
         claims.append({"claim": "candidate committed",
                        "evidence": {"type": "git_diff_digest", "worktree_head": candidate_ref}})
 
