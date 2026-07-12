@@ -18,6 +18,7 @@ class Transition(StrEnum):
 
 @dataclass(frozen=True)
 class TestDelta:
+    __test__ = False  # not a pytest test class — name collides with pytest's Test* convention
     test_id: str
     kind: Transition
     trace_head: str = ""
