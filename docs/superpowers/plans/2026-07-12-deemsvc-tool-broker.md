@@ -310,7 +310,11 @@ import signal
 def _confine(timeout_s: int) -> Callable[[], None]:
     def hook() -> None:
         resource.setrlimit(resource.RLIMIT_CPU, (timeout_s, timeout_s + 10))
-        resource.setrlimit(resource.RLIMIT_AS, (6 << 30, 6 << 30))
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (6 << 30, 6 << 30))
+        except ValueError:
+            pass  # RLIMIT_AS is unconditionally unsettable on macOS/Darwin;
+                  # CPU/NOFILE/FSIZE below remain enforced everywhere.
         resource.setrlimit(resource.RLIMIT_NOFILE, (512, 512))
         resource.setrlimit(resource.RLIMIT_FSIZE, (512 << 20, 512 << 20))
     return hook
@@ -324,7 +328,10 @@ Add these methods to `ToolBroker` (after `_render`):
         buf, truncated = bytearray(), False
         while chunk := await stream.read(65536):
             if len(buf) < cap:
-                buf += chunk[: cap - len(buf)]
+                take = chunk[: cap - len(buf)]
+                buf += take
+                if len(take) < len(chunk):
+                    truncated = True   # this chunk alone overflowed the cap
             else:
                 truncated = True   # keep draining so the child never blocks on a full pipe
         return bytes(buf), truncated
@@ -372,10 +379,28 @@ Add these methods to `ToolBroker` (after `_render`):
             return ToolOutcome(kind, code, parsed, truncated,
                                stderr[-2048:].decode(errors="replace"), wall_ms)
 
-        kind = OutcomeKind.TOOL_MISUSE if 2 <= code <= 4 else OutcomeKind.INFRA_FAILURE
+        # 1-4 (not 2-4) because real git returns exit 1 for an unknown subcommand.
+        # This range is tuned for git's "misuse" convention specifically — a future
+        # REGISTRY entry (a non-git tool, or a git subcommand like merge/cherry-pick/
+        # bisect where exit 1 is a legitimate conflict, not misuse) must pre-empt
+        # this fallback via its own ok_exits/signal_exits rather than relying on it.
+        kind = OutcomeKind.TOOL_MISUSE if 1 <= code <= 4 else OutcomeKind.INFRA_FAILURE
         return ToolOutcome(kind, code, {}, truncated,
                            stderr[-2048:].decode(errors="replace"), wall_ms)
 ```
+
+**Note (corrected after implementation, three fixes verified by review):**
+1. `_confine` wraps `RLIMIT_AS` in try/except — it's unconditionally unsettable on
+   macOS/Darwin (confirmed by direct probe across 1 GiB-256 GiB limits); the other
+   three rlimits remain unconditionally enforced everywhere.
+2. `invoke`'s misuse-exit-code range widened from `2-4` to `1-4` — real `git` returns
+   exit 1 for an unknown subcommand, not 2-4, confirmed against every git subcommand
+   this `REGISTRY["git"]` entry is used for (rev-parse, worktree add/remove, diff);
+   none of their legitimate failure modes land in 1-4, only "not a git command" does.
+3. `_drain`'s truncation flag now also fires when a single `read()` chunk alone
+   exceeds `cap`, not only on a subsequent chunk after the buffer is already full —
+   the original code never set `truncated=True` when an entire over-cap output
+   arrived in one chunk, which is exactly what this task's own truncation test does.
 
 - [ ] **Step 4: Run the test to verify it passes**
 

@@ -160,6 +160,12 @@ class ToolBroker:
             return ToolOutcome(kind, code, parsed, truncated,
                                stderr[-2048:].decode(errors="replace"), wall_ms)
 
+        # 1-4 (not the blueprint's original 2-4) because real git returns exit 1 for
+        # an unknown subcommand. This range is tuned for git's "misuse" convention
+        # specifically — a future REGISTRY entry (a non-git tool, or a git subcommand
+        # like merge/cherry-pick/bisect where exit 1 is a legitimate conflict, not
+        # misuse) must pre-empt this fallback via its own ok_exits/signal_exits rather
+        # than relying on this default.
         kind = OutcomeKind.TOOL_MISUSE if 1 <= code <= 4 else OutcomeKind.INFRA_FAILURE
         return ToolOutcome(kind, code, {}, truncated,
                            stderr[-2048:].decode(errors="replace"), wall_ms)
