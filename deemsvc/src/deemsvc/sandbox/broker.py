@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import resource
@@ -67,6 +68,15 @@ def _parse_junit(stdout: bytes, workdir: str) -> dict:
     return {"cases": cases, "total": len(cases)}
 
 
+def _parse_ruff(stdout: bytes, workdir: str) -> dict:
+    findings = json.loads(stdout or b"[]")
+    return {"findings": [
+        {"path": os.path.relpath(f["filename"], workdir), "line": f["location"]["row"],
+         "code": f["code"], "msg": f["message"][:200]}
+        for f in findings
+    ]}
+
+
 REGISTRY: dict[str, ToolSpec] = {
     "git": ToolSpec(
         name="git",
@@ -89,6 +99,15 @@ REGISTRY: dict[str, ToolSpec] = {
         ok_exits=frozenset({0}),
         signal_exits=frozenset({1, 5}),       # 1 = failures, 5 = nothing collected
         parser=_parse_junit,
+    ),
+    "ruff-json": ToolSpec(
+        name="ruff-json",
+        argv=("python3", "-m", "ruff", "check", "--output-format", "json",
+              "--exit-zero", "{path}"),
+        timeout_s=120,
+        ok_exits=frozenset({0}),
+        signal_exits=frozenset(),
+        parser=_parse_ruff,
     ),
 }
 
