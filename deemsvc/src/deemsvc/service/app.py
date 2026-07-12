@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from deemsvc.orchestrator.journal import JsonlJournal
@@ -79,3 +81,35 @@ async def start_run(req: StartRunRequest) -> dict:
     orchestrator = Orchestrator(intent, budget, dispatch, journal_and_publish)
     entry.task = asyncio.create_task(orchestrator.run(graph))
     return {"run_id": run_id}
+
+
+@app.get("/runs/{run_id}/events")
+async def stream_events(run_id: str) -> StreamingResponse:
+    entry = app.state.registry.get(run_id)
+    if entry is None:
+        raise HTTPException(404, "unknown run_id")
+
+    async def gen():
+        # Replay what's already on disk first, so a client that connects after
+        # the run finished still sees the full history.
+        for line in open(entry.journal.path):
+            line = line.strip()
+            if line:
+                yield f"data: {line}\n\n"
+
+        if entry.task is not None and entry.task.done():
+            return  # nothing more will ever be published
+
+        queue = app.state.registry.subscribe(run_id)
+        try:
+            while True:
+                record = await queue.get()
+                yield f"data: {json.dumps(record, sort_keys=True, default=str)}\n\n"
+                if record.get("to") in ("passed", "abandoned", "escalated") and (
+                    entry.task is not None and entry.task.done()
+                ):
+                    break
+        finally:
+            app.state.registry.unsubscribe(run_id, queue)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
