@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from deemsvc.orchestrator.state import Step, StepResult
-from deemsvc.sandbox.broker import OutcomeKind, ToolBroker
+from deemsvc.sandbox.broker import ToolBroker
 from .memory import MemoryStore
 from .request import build_request
 

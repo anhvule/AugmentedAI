@@ -1,6 +1,5 @@
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
