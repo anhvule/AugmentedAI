@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import Awaitable, Callable, Literal
 
 
 class StepStatus(StrEnum):
@@ -21,7 +23,15 @@ class StepStatus(StrEnum):
 
 _LEGAL: dict[StepStatus, frozenset[StepStatus]] = {
     StepStatus.BLOCKED:    frozenset({StepStatus.READY, StepStatus.ABANDONED}),
-    StepStatus.READY:      frozenset({StepStatus.DISPATCHED, StepStatus.ABANDONED}),
+    # NOTE: ESCALATED was added here during Task 5. The orchestrator's frontier
+    # scanner promotes BLOCKED -> READY before checking budget (READY means
+    # "awaiting budget + slot", per the enum docstring); when the subsequent
+    # TokenBudget.reserve() call raises BudgetExhausted, the step must be able
+    # to move directly from READY to ESCALATED. Without this entry that path
+    # raises IllegalTransition on every budget-starved dispatch attempt. See
+    # task-5-report.md "Deviations from brief" for the full trace.
+    StepStatus.READY:      frozenset({StepStatus.DISPATCHED, StepStatus.ESCALATED,
+                                      StepStatus.ABANDONED}),
     StepStatus.DISPATCHED: frozenset({StepStatus.EXECUTING, StepStatus.ESCALATED,
                                       StepStatus.ABANDONED}),
     StepStatus.EXECUTING:  frozenset({StepStatus.VERIFYING, StepStatus.RETRYING,
@@ -132,3 +142,92 @@ class StepResult:
     tokens_spent: int
     evidence: dict                      # digests, junit transitions, exit codes
     feedback: dict | None = None
+
+
+class Orchestrator:
+    def __init__(
+        self,
+        intent: Intent,
+        budget: TokenBudget,
+        dispatch: Callable[[Step], Awaitable[StepResult]],
+        journal: Callable[[dict], None],
+        max_concurrency: int = 4,
+    ):
+        self.intent, self.budget = intent, budget
+        self._dispatch, self._journal = dispatch, journal
+        self._sem = asyncio.Semaphore(max_concurrency)
+
+    def _transition(self, step: Step, to: StepStatus) -> None:
+        if to not in _LEGAL[step.status]:
+            raise IllegalTransition(f"{step.id}: {step.status} -> {to}")
+        self._journal({"ts": time.time(), "step": step.id,
+                       "from": step.status, "to": to,
+                       "intent_digest": self.intent.digest,
+                       "budget_pressure": round(self.budget.pressure(), 4)})
+        step.status = to
+
+    def _frontier(self, graph: dict[str, Step]) -> list[Step]:
+        for s in graph.values():
+            if s.status is StepStatus.BLOCKED and all(
+                graph[d].status is StepStatus.PASSED for d in s.deps
+            ):
+                self._transition(s, StepStatus.READY)
+        return [s for s in graph.values() if s.status is StepStatus.READY]
+
+    def _abandon_dependents(self, graph: dict[str, Step], failed_id: str) -> None:
+        doomed, stack = set(), [failed_id]
+        while stack:
+            cur = stack.pop()
+            for s in graph.values():
+                if cur in s.deps and s.id not in doomed:
+                    doomed.add(s.id)
+                    stack.append(s.id)
+        for sid in doomed:
+            if graph[sid].status not in (StepStatus.PASSED, StepStatus.ABANDONED):
+                self._transition(graph[sid], StepStatus.ABANDONED)
+
+    async def _run_step(self, step: Step) -> StepResult:
+        async with self._sem:
+            self._transition(step, StepStatus.EXECUTING)
+            step.attempts += 1
+            return await self._dispatch(step)
+
+    async def run(self, graph: dict[str, Step]) -> dict[str, Step]:
+        inflight: dict[asyncio.Task[StepResult], Step] = {}
+        while True:
+            if self.budget.pressure() < self.budget.escalation_watermark:
+                for step in self._frontier(graph):
+                    try:
+                        self.budget.reserve(step.id, step.step_class, step.fallback_cost)
+                    except BudgetExhausted:
+                        self._transition(step, StepStatus.ESCALATED)
+                        continue
+                    self._transition(step, StepStatus.DISPATCHED)
+                    inflight[asyncio.create_task(self._run_step(step))] = step
+
+            if not inflight:
+                stuck = [s for s in graph.values()
+                         if s.status not in (StepStatus.PASSED, StepStatus.ABANDONED,
+                                             StepStatus.ESCALATED)]
+                if stuck:  # cycle or budget starvation — surface, don't spin
+                    for s in stuck:
+                        self._transition(s, StepStatus.ESCALATED)
+                return graph
+
+            done, _ = await asyncio.wait(inflight, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                step = inflight.pop(task)
+                result = task.result()
+                self.budget.commit(step.id, step.step_class, result.tokens_spent)
+                match result.verdict:
+                    case "pass":
+                        self._transition(step, StepStatus.VERIFYING)
+                        self._transition(step, StepStatus.PASSED)
+                    case "retry" if step.attempts < step.max_attempts:
+                        step.feedback = result.feedback
+                        self._transition(step, StepStatus.RETRYING)
+                        self._transition(step, StepStatus.DISPATCHED)
+                        inflight[asyncio.create_task(self._run_step(step))] = step
+                    case _:
+                        self._transition(step, StepStatus.ESCALATED)
+                        self._abandon_dependents(graph, step.id)
