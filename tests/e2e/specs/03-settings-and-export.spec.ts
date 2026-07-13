@@ -40,17 +40,33 @@ test('Flow 3b: export opens a new Electron window at the export URL', async ({
   await expect(window.getByRole('heading', { name: 'Exportable task' })).toBeVisible();
 
   // "Export Task.md" calls window.open('/api/tasks/:id/export/task', '_blank'),
-  // which main.cjs's setWindowOpenHandler allows (localhost) → Electron opens
-  // a new BrowserWindow for it. That response carries
-  // `Content-Disposition: attachment`, so Chromium/Electron treats it as a
-  // file download rather than a page navigation: the transient window never
-  // commits a navigation (its `url()` stays blank) and is torn down again
-  // almost immediately, which makes `app.waitForEvent('window')` + asserting
-  // on `popup.url()` unreliable/flaky in practice. The one dependable,
-  // ground-truth signal is the underlying HTTP response, visible on the
-  // shared Electron BrowserContext regardless of which (possibly
-  // short-lived) page issued the request — so we assert on that instead.
-  const [response] = await Promise.all([
+  // which main.cjs's setWindowOpenHandler allows (localhost) → Electron
+  // creates a new BrowserWindow for it. We assert on two independent
+  // signals: Electron's own main-process 'browser-window-created' event
+  // (observed via app.evaluate, since it runs inside the main process)
+  // proves the allow-handler actually created a new BrowserWindow — as
+  // opposed to a same-window navigation — while the `response` event gives
+  // a robust, ground-truth check of the export URL and status.
+  //
+  // We do NOT use app.waitForEvent('window') / assert on a popup Page here:
+  // the export response carries `Content-Disposition: attachment`, so
+  // Chromium/Electron aborts the navigation and treats it as a file download
+  // before any frame commits. Verified empirically (via app.evaluate probes
+  // and a main-process debug listener) that no CDP page target is ever
+  // created for this window in that case, so Playwright never surfaces it
+  // as a trackable Page — `app.waitForEvent('window')` (and the underlying
+  // `context().on('page')`) times out deterministically, even though the
+  // BrowserWindow really was created. The 'browser-window-created' app
+  // event fires regardless, since it's raised by Electron itself the
+  // moment the allow-handler's window is constructed, not by Playwright's
+  // page-tracking layer.
+  const [, response] = await Promise.all([
+    app.evaluate(
+      ({ app: electronApp }) =>
+        new Promise<void>((resolve) => {
+          electronApp.once('browser-window-created', () => resolve());
+        })
+    ),
     app.context().waitForEvent('response', (r) => r.url().includes('/export/task')),
     window.getByRole('button', { name: 'Export Task.md' }).click(),
   ]);
