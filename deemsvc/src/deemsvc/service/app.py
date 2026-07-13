@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from deemsvc.orchestrator.journal import JsonlJournal
-from deemsvc.orchestrator.state import Intent, Orchestrator, Step, TokenBudget
+from deemsvc.orchestrator.state import Intent, Orchestrator, Step, StepStatus, TokenBudget
 
 from .registry import RunRegistry
 
@@ -32,6 +32,10 @@ class StartRunRequest(BaseModel):
     token_ceiling: int = 500_000
     max_attempts: int = 4
     agent: str = "fable5-native"    # any name in deemsvc.sdk.registry.ADAPTER_FACTORIES
+
+
+class ResumeRequest(BaseModel):
+    step_id: str
 
 
 def _default_dispatcher_factory(intent: Intent, budget: TokenBudget, agent_name: str):
@@ -163,3 +167,44 @@ async def stream_events(run_id: str) -> StreamingResponse:
             app.state.registry.unsubscribe(run_id, queue)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/runs/{run_id}/state")
+async def get_state(run_id: str) -> dict:
+    entry = app.state.registry.get(run_id)
+    if entry is None:
+        raise HTTPException(404, "unknown run_id")
+    return {
+        "run_id": run_id,
+        "done": entry.task.done() if entry.task else False,
+        "steps": {sid: {"status": s.status.value, "attempts": s.attempts}
+                 for sid, s in entry.graph.items()},
+    }
+
+
+@app.post("/runs/{run_id}/resume")
+async def resume_run(run_id: str, req: ResumeRequest) -> dict:
+    entry = app.state.registry.get(run_id)
+    if entry is None:
+        raise HTTPException(404, "unknown run_id")
+    step = entry.graph.get(req.step_id)
+    if step is None:
+        raise HTTPException(404, "unknown step_id")
+    if step.status is not StepStatus.ESCALATED:
+        raise HTTPException(409, f"step is {step.status}, not escalated")
+
+    intent = Intent(goal="resumed", acceptance_criteria=(), protected_paths=(),
+                    forbidden_actions=(), baseline_ref="0" * 40)
+    budget = TokenBudget(ceiling=500_000)
+    # Reuse the same agent the run was started with — a resumed escalation
+    # shouldn't silently switch backends underneath the operator.
+    dispatch = app.state.dispatcher_factory(intent, budget, entry.agent)
+
+    def journal_and_publish(record: dict) -> None:
+        entry.journal.append(record)
+        app.state.registry.publish(run_id, record)
+
+    orchestrator = Orchestrator(intent, budget, dispatch, journal_and_publish)
+    orchestrator.resume_step(step)
+    entry.task = asyncio.create_task(orchestrator.run(entry.graph))
+    return {"resumed": req.step_id}
