@@ -4,7 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, '..', 'data');
+// DEEM_DATA_DIR lets tests (and ops) redirect persistence to an isolated dir.
+const DATA_DIR = process.env.DEEM_DATA_DIR || path.join(__dirname, '..', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'deem.json');
 
 const EMPTY = {
