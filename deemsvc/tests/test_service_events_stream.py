@@ -61,9 +61,12 @@ async def test_events_stream_live_delivers_terminal_record(tmp_path):
     """Exercises the live (not-yet-completed) streaming path: the SSE
     connection subscribes while the run is still executing, and only then is
     the run allowed to finish. This covers registry.subscribe()/the live
-    queue loop, and reproduces the scenario the read-then-subscribe race
-    could lose: a terminal record published in the (now-closed) gap between
-    finishing the on-disk replay and calling subscribe()."""
+    queue loop and asserts the client receives the full, exact, in-order
+    record sequence with no drops or duplicates. It does NOT pin the
+    replay-vs-subscribe ordering itself (wall-clock polling can't force that
+    race deterministically) — see
+    test_events_stream_subscribes_before_reading_journal_file for the actual
+    ordering-invariant regression guard."""
     app.state.data_dir = str(tmp_path)
     release = asyncio.Event()
     app.state.dispatcher_factory = lambda intent, budget, agent_name: _GatedDispatcher(release)
