@@ -11,12 +11,14 @@
     "build": "vite build --config web/vite.config.js",
     "start": "NODE_ENV=production node server/index.js",
     "app": "npm run build && electron electron/main.cjs",
-    "test": "node --test server/tests/*.test.js"
+    "test": "node --test server/tests/*.test.js",
+    "test:e2e": "playwright test --config tests/e2e/playwright.config.ts"
   },
   "dependencies": {
     "express": "^4.21.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.2",
     "electron": "^43.1.0",
