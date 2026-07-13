@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import uuid
+from collections import Counter
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -90,21 +91,51 @@ async def stream_events(run_id: str) -> StreamingResponse:
         raise HTTPException(404, "unknown run_id")
 
     async def gen():
-        # Replay what's already on disk first, so a client that connects after
-        # the run finished still sees the full history.
-        for line in open(entry.journal.path):
-            line = line.strip()
-            if line:
-                yield f"data: {line}\n\n"
-
-        if entry.task is not None and entry.task.done():
-            return  # nothing more will ever be published
-
+        # Subscribe BEFORE replaying the on-disk journal. The generator yields
+        # control back to the event loop on every `yield` (the ASGI layer
+        # flushes each chunk), so if we replayed the file first and only
+        # subscribed afterwards, a record — including the terminal
+        # passed/abandoned/escalated one — could be journaled+published in
+        # that gap and be missed entirely: not on disk in time for replay,
+        # and not delivered live because we weren't subscribed yet. By
+        # subscribing first, any record published during replay is already
+        # queued for us; we just need to de-dup it against what we replay
+        # from disk, since the producer journals a record to disk *before*
+        # publishing it (see journal_and_publish in start_run), so the same
+        # record can land in both places.
         queue = app.state.registry.subscribe(run_id)
         try:
+            replayed_counts: Counter[str] = Counter()
+            with open(entry.journal.path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        replayed_counts[line] += 1
+                        yield f"data: {line}\n\n"
+
+            # Drain anything that raced onto the queue while we were reading
+            # the file, de-duping against what we just replayed from disk.
+            while True:
+                try:
+                    record = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                serialized = json.dumps(record, sort_keys=True, default=str)
+                if replayed_counts[serialized] > 0:
+                    replayed_counts[serialized] -= 1
+                    continue
+                yield f"data: {serialized}\n\n"
+
+            if entry.task is not None and entry.task.done():
+                return  # producer finished; nothing more will ever be published
+
             while True:
                 record = await queue.get()
-                yield f"data: {json.dumps(record, sort_keys=True, default=str)}\n\n"
+                serialized = json.dumps(record, sort_keys=True, default=str)
+                if replayed_counts[serialized] > 0:
+                    replayed_counts[serialized] -= 1
+                    continue
+                yield f"data: {serialized}\n\n"
                 if record.get("to") in ("passed", "abandoned", "escalated") and (
                     entry.task is not None and entry.task.done()
                 ):
