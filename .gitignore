@@ -13,3 +13,8 @@ deemsvc/src/*.egg-info/
 **/__pycache__/
 *.pyc
 .pytest_cache/
+
+# Nx
+.nx/cache
+.nx/workspace-data
+dist
