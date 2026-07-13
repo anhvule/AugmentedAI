@@ -8,8 +8,4 @@ export class AppShell {
     // exact:true so it never matches "Update settings" / "Save settings".
     return this.page.getByRole('button', { name: 'Settings', exact: true }).click();
   }
-
-  gotoHome(): Promise<void> {
-    return this.page.getByRole('link', { name: 'Home' }).click();
-  }
 }

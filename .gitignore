@@ -13,3 +13,7 @@ deemsvc/src/*.egg-info/
 **/__pycache__/
 *.pyc
 .pytest_cache/
+
+# Playwright E2E output
+test-results/
+playwright-report/

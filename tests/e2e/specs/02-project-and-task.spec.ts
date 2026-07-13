@@ -2,11 +2,13 @@ import { test, expect } from '../fixtures/electron';
 import { LoginPage } from '../pages/LoginPage';
 import { HomePage } from '../pages/HomePage';
 import { ProjectPage } from '../pages/ProjectPage';
+import { TaskPage } from '../pages/TaskPage';
 
 test('Flow 2: create a project and a task', async ({ window, tmpRepo }) => {
   const login = new LoginPage(window);
   const home = new HomePage(window);
   const project = new ProjectPage(window);
+  const taskPage = new TaskPage(window);
 
   await login.register('Aiko Sato', 'aiko@example.com', 'secret123');
   await expect(home.dashboardHeading()).toBeVisible();
@@ -26,11 +28,11 @@ test('Flow 2: create a project and a task', async ({ window, tmpRepo }) => {
     requirements: ['User can submit the signup form', 'Form validates email'],
   });
   // Task detail renders the task name as a heading + a Back to Project link.
-  await expect(window.getByRole('heading', { name: 'Wire up landing page' })).toBeVisible();
-  await expect(window.getByRole('link', { name: 'Back to Project' })).toBeVisible();
+  await expect(taskPage.heading('Wire up landing page')).toBeVisible();
+  await expect(taskPage.backToProjectLink()).toBeVisible();
 
   // Back on the project page, the new task shows in the task list.
-  await window.getByRole('link', { name: 'Back to Project' }).click();
+  await taskPage.backToProjectLink().click();
   await expect(project.heading('Q3 Marketing Launch')).toBeVisible();
   await expect(window.getByText('Wire up landing page')).toBeVisible();
 });

@@ -27,10 +27,15 @@ export const test = base.extend<DeemFixtures>({
       args: [path.join(process.cwd(), 'electron', 'main.cjs'), '--no-sandbox'],
       env: { ...process.env, DEEM_PORT: String(PORT), DEEM_DATA_DIR: dataDir },
     });
-    await use(app);
-    // Always tear down, even on failure, so the port/store are freed.
-    await app.close();
-    cleanupDir(dataDir);
+    // Always tear down, even on failure, so the port/store are freed. Guard
+    // close() with .catch() so a throwing close() can never skip cleanupDir
+    // and leak the temp data dir.
+    try {
+      await use(app);
+    } finally {
+      await app.close().catch(() => {});
+      cleanupDir(dataDir);
+    }
   },
 
   window: async ({ app }, use) => {

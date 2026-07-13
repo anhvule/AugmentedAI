@@ -4,6 +4,7 @@ import { HomePage } from '../pages/HomePage';
 import { ProjectPage } from '../pages/ProjectPage';
 import { AppShell } from '../pages/AppShell';
 import { SettingsModal } from '../pages/SettingsModal';
+import { TaskPage } from '../pages/TaskPage';
 
 test('Flow 3a: settings budget persists across reopen', async ({ window }) => {
   const login = new LoginPage(window);
@@ -32,12 +33,13 @@ test('Flow 3b: export opens a new Electron window at the export URL', async ({
   const login = new LoginPage(window);
   const home = new HomePage(window);
   const project = new ProjectPage(window);
+  const taskPage = new TaskPage(window);
 
   await login.register('Aiko Sato', 'aiko@example.com', 'secret123');
   await home.createProject({ name: 'Export Proj', repoPath: tmpRepo });
   await expect(project.heading('Export Proj')).toBeVisible();
   await project.createTask({ name: 'Exportable task' });
-  await expect(window.getByRole('heading', { name: 'Exportable task' })).toBeVisible();
+  await expect(taskPage.heading('Exportable task')).toBeVisible();
 
   // "Export Task.md" calls window.open('/api/tasks/:id/export/task', '_blank'),
   // which main.cjs's setWindowOpenHandler allows (localhost) → Electron
@@ -60,16 +62,31 @@ test('Flow 3b: export opens a new Electron window at the export URL', async ({
   // event fires regardless, since it's raised by Electron itself the
   // moment the allow-handler's window is constructed, not by Playwright's
   // page-tracking layer.
-  const [, response] = await Promise.all([
-    app.evaluate(
-      ({ app: electronApp }) =>
-        new Promise<void>((resolve) => {
-          electronApp.once('browser-window-created', () => resolve());
-        })
-    ),
+  //
+  // Arm a main-process listener BEFORE clicking, so registration can't lose a
+  // race with the window.open the click triggers. Store the result on a global
+  // in the main process (same process persists across app.evaluate calls).
+  await app.evaluate(({ app: electronApp }) => {
+    (globalThis as any).__deemNewWindow = new Promise((resolve) => {
+      electronApp.once('browser-window-created', () => resolve(true));
+    });
+  });
+
+  const [response] = await Promise.all([
     app.context().waitForEvent('response', (r) => r.url().includes('/export/task')),
-    window.getByRole('button', { name: 'Export Task.md' }).click(),
+    taskPage.exportTaskButton().click(),
   ]);
+
+  // Race against a short timeout so a missing window fails with a legible
+  // boolean assertion, not a 60s hang.
+  const newWindowCreated = await app.evaluate(() =>
+    Promise.race([
+      (globalThis as any).__deemNewWindow,
+      new Promise((resolve) => setTimeout(() => resolve(false), 5000)),
+    ])
+  );
+  expect(newWindowCreated).toBe(true);
+
   expect(response.url()).toContain('/api/tasks/');
   expect(response.url()).toContain('/export/task');
   expect(response.status()).toBe(200);
