@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass, field
 
 from deemsvc.orchestrator.journal import JsonlJournal
-from deemsvc.orchestrator.state import Step
+from deemsvc.orchestrator.state import Intent, Step, TokenBudget
 
 
 @dataclass
@@ -13,6 +13,8 @@ class RunEntry:
     graph: dict[str, Step]
     task: asyncio.Task | None
     journal: JsonlJournal
+    intent: Intent                      # pinned at run start — resume reuses it, never fabricates
+    budget: TokenBudget                 # same object across resume — preserves consumed accounting
     agent: str = "fable5-native"        # which AgentAdapter this run uses — resume reuses it
     subscribers: set[asyncio.Queue] = field(default_factory=set)
 
@@ -22,8 +24,10 @@ class RunRegistry:
         self._runs: dict[str, RunEntry] = {}
 
     def create(self, run_id: str, graph: dict[str, Step], journal: JsonlJournal,
+              intent: Intent, budget: TokenBudget,
               agent: str = "fable5-native") -> RunEntry:
-        entry = RunEntry(run_id=run_id, graph=graph, task=None, journal=journal, agent=agent)
+        entry = RunEntry(run_id=run_id, graph=graph, task=None, journal=journal,
+                         intent=intent, budget=budget, agent=agent)
         self._runs[run_id] = entry
         return entry
 

@@ -76,7 +76,7 @@ async def start_run(req: StartRunRequest) -> dict:
 
     journal_path = os.path.join(app.state.data_dir, run_id, "journal.jsonl")
     journal = JsonlJournal(journal_path)
-    entry = app.state.registry.create(run_id, graph, journal, agent=req.agent)
+    entry = app.state.registry.create(run_id, graph, journal, intent, budget, agent=req.agent)
 
     def journal_and_publish(record: dict) -> None:
         journal.append(record)
@@ -193,9 +193,14 @@ async def resume_run(run_id: str, req: ResumeRequest) -> dict:
     if step.status is not StepStatus.ESCALATED:
         raise HTTPException(409, f"step is {step.status}, not escalated")
 
-    intent = Intent(goal="resumed", acceptance_criteria=(), protected_paths=(),
-                    forbidden_actions=(), baseline_ref="0" * 40)
-    budget = TokenBudget(ceiling=500_000)
+    # Reuse the Intent/TokenBudget the run was originally started with, rather
+    # than fabricating placeholders. Intent is pinned-at-run-start and must
+    # never drift across a resume. The budget object is reused as-is (not
+    # recreated) because it carries committed/reserved accounting from steps
+    # that already ran before the escalation — a fresh TokenBudget would reset
+    # that state and let the resumed run spend past the original ceiling.
+    intent = entry.intent
+    budget = entry.budget
     # Reuse the same agent the run was started with — a resumed escalation
     # shouldn't silently switch backends underneath the operator.
     dispatch = app.state.dispatcher_factory(intent, budget, entry.agent)
