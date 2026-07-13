@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+.git
+dist
+.nx
+deemsvc/.venv
+**/__pycache__
+*.pyc
+data
+test-results
+playwright-report
+blob-report
+*.log
+My Movie 2-compressed.mp4
+.DS_Store

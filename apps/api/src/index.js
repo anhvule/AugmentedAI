@@ -25,12 +25,12 @@ app.use(express.json({ limit: '2mb' }));
 app.use('/api', authMiddleware);
 
 let deemsvc = null;
-try {
-  deemsvc = await startDeemsvc({ port: 8731 });
-  console.log(`[deemsvc] ready at ${deemsvc.baseUrl}`);
-} catch (err) {
-  console.error(`[deemsvc] failed to start — deemsvc-backed agent options will error until this is fixed: ${err.message}`);
-}
+// Start deemsvc in the background so it never blocks the HTTP server from
+// binding $PORT — the health check and web UI must come up immediately even if
+// deemsvc is slow or crash-looping. deemsvc-backed agents error until it's ready.
+startDeemsvc({ port: 8731 })
+  .then((svc) => { deemsvc = svc; console.log(`[deemsvc] ready at ${svc.baseUrl}`); })
+  .catch((err) => { console.error(`[deemsvc] failed to start — deemsvc-backed agent options will error until this is fixed: ${err.message}`); });
 
 const state = () => db.get();
 const findTask = (id) => state().tasks.find((t) => t.id === id);
@@ -444,7 +444,8 @@ if (fs.existsSync(dist)) {
 const recovered = recoverInterrupted();
 if (recovered) console.log(`[recovery] marked ${recovered} interrupted phase(s) as stopped`);
 
-const PORT = process.env.DEEM_PORT || 4501;
+// Render (and any PaaS) assigns $PORT; DEEM_PORT stays for local dev / e2e.
+const PORT = process.env.PORT || process.env.DEEM_PORT || 4501;
 app.listen(PORT, () => console.log(`Deem server listening on http://localhost:${PORT}`));
 syncTelegram();
 audit('system', 'server.start', { recovered });

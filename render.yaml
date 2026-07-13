@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: deem
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DEEM_DATA_DIR
+        value: /data
+      - key: ANTHROPIC_API_KEY
+        sync: false   # set in the Render dashboard; the mock agent works without it
+    disk:
+      name: deem-data
+      mountPath: /data
+      sizeGB: 1

@@ -125,3 +125,24 @@ server as a single process.
 
 Vector-embedding retrieval for the knowledge base, per-user permissions/roles,
 more chat platforms (Slack, Discord) on the shared command engine.
+
+## Deploy to Render
+
+Deem deploys to [Render](https://render.com) as a single Dockerized web
+service — the Node API serves the built web app and `/api`, and supervises the
+Python `deemsvc` — with a persistent disk for the JSON store.
+
+1. Push this repo to GitHub (or connect it directly in Render).
+2. In Render: **New → Blueprint**, point it at this repo. Render reads
+   `render.yaml` and provisions the `deem` web service + a 1 GB disk at `/data`.
+3. Set `ANTHROPIC_API_KEY` in the service's **Environment** (needed for real /
+   deemsvc agents; the **mock** agent runs without it).
+4. Deploy. Render builds the `Dockerfile`, runs `node apps/api/src/index.js`
+   bound to the assigned `$PORT`, and health-checks `GET /api/health`.
+
+**Notes**
+- Data (JSON store + audit log) persists under `DEEM_DATA_DIR=/data` on the
+  mounted disk, surviving restarts and deploys.
+- Deem drives AI agents against *local* git repositories; a cloud container has
+  none, so a hosted deploy is a control-plane / demo, not full desktop parity.
+- Local Docker parity: `docker build -t deem . && docker run -e PORT=10000 -p 10000:10000 deem`, then open `http://localhost:10000`.
