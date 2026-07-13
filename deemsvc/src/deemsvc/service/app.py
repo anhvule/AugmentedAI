@@ -106,6 +106,29 @@ async def stream_events(run_id: str) -> StreamingResponse:
         queue = app.state.registry.subscribe(run_id)
         try:
             replayed_counts: Counter[str] = Counter()
+
+            def format_if_new(record: dict) -> str | None:
+                """De-dup `record` against what replay already sent from disk and
+                return its SSE line, or None if it's a duplicate to skip.
+
+                Shared by the drain loop and the live loop below. In practice only
+                the drain loop can ever find a match: `subscribe()` runs before any
+                `await` in this generator, and `queue.get_nowait()` in the drain
+                loop never yields control either, so nothing can land on the queue
+                between subscribing and the drain loop finishing — every record
+                that could overlap with the on-disk replay is already queued and
+                resolved by the time the live loop's first `await queue.get()`
+                runs. The live loop keeps the same check anyway (rather than
+                trusting that invariant) so a single overlap check covers both call
+                sites and neither loop silently double-sends if the timing
+                assumption above is ever violated by a future change.
+                """
+                serialized = json.dumps(record, sort_keys=True, default=str)
+                if replayed_counts[serialized] > 0:
+                    replayed_counts[serialized] -= 1
+                    return None
+                return f"data: {serialized}\n\n"
+
             with open(entry.journal.path) as f:
                 for line in f:
                     line = line.strip()
@@ -120,26 +143,22 @@ async def stream_events(run_id: str) -> StreamingResponse:
                     record = queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
-                serialized = json.dumps(record, sort_keys=True, default=str)
-                if replayed_counts[serialized] > 0:
-                    replayed_counts[serialized] -= 1
-                    continue
-                yield f"data: {serialized}\n\n"
+                line_out = format_if_new(record)
+                if line_out is not None:
+                    yield line_out
 
             if entry.task is not None and entry.task.done():
                 return  # producer finished; nothing more will ever be published
 
             while True:
                 record = await queue.get()
-                serialized = json.dumps(record, sort_keys=True, default=str)
-                if replayed_counts[serialized] > 0:
-                    replayed_counts[serialized] -= 1
-                    continue
-                yield f"data: {serialized}\n\n"
-                if record.get("to") in ("passed", "abandoned", "escalated") and (
-                    entry.task is not None and entry.task.done()
-                ):
-                    break
+                line_out = format_if_new(record)
+                if line_out is not None:
+                    yield line_out
+                    if record.get("to") in ("passed", "abandoned", "escalated") and (
+                        entry.task is not None and entry.task.done()
+                    ):
+                        break
         finally:
             app.state.registry.unsubscribe(run_id, queue)
 
