@@ -12,7 +12,9 @@ export const codexAgent = {
           ? '--full-auto' // workspace-write sandbox
           : '--dangerously-bypass-approvals-and-sandbox';
       const args = ['exec', '--json', '--skip-git-repo-check', sandbox, prompt];
-      const child = spawn('codex', args, { cwd: cwd || process.cwd(), env: process.env });
+      // CODEX_BIN lets ops point at an absolute path when `codex` isn't on the
+      // server process's PATH (e.g. launched from an IDE with a trimmed PATH).
+      const child = spawn(process.env.CODEX_BIN || 'codex', args, { cwd: cwd || process.cwd(), env: process.env });
       registerChild?.(child);
       let lastMessage = '';
       let stderr = '';
