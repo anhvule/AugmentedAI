@@ -1,0 +1,28 @@
+{
+  "name": "api",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "apps/api/src",
+  "targets": {
+    "serve": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node --watch apps/api/src/index.js",
+        "env": { "DEEM_PORT": "4501" }
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/dist/apps/api"],
+      "options": {
+        "command": "node -e \"require('node:fs').cpSync('apps/api/src','dist/apps/api',{recursive:true})\""
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node --test apps/api/src/tests/*.test.js"
+      }
+    }
+  }
+}
