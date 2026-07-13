@@ -1,19 +1,26 @@
-import React, { useState } from 'react';
-import { api } from '../api.js';
+import { useState } from 'react';
+import { Profile } from '@deem/shared';
+import { api } from '../api';
 
-export default function Login({ onLogin }) {
-  const [mode, setMode] = useState('login');
-  const [form, setForm] = useState({ name: '', email: '', password: '' });
+interface LoginForm {
+  name: string;
+  email: string;
+  password: string;
+}
+
+export default function Login({ onLogin }: { onLogin: (profile: Profile) => void }) {
+  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [form, setForm] = useState<LoginForm>({ name: '', email: '', password: '' });
   const [err, setErr] = useState('');
-  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const set = (k: keyof LoginForm) => (e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, [k]: e.target.value });
 
-  const submit = async (e) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr('');
     try {
-      onLogin(await api.post(mode === 'login' ? '/api/login' : '/api/register', form));
+      onLogin(await api.post<Profile>(mode === 'login' ? '/api/login' : '/api/register', form));
     } catch (ex) {
-      setErr(ex.message);
+      setErr((ex as Error).message);
     }
   };
 

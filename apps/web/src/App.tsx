@@ -1,19 +1,27 @@
-import React, { useEffect, useState, createContext, useContext } from 'react';
+import { useEffect, useState, createContext, useContext } from 'react';
 import { Outlet, Link, useNavigate } from 'react-router-dom';
-import { api } from './api.js';
-import { Kicker } from './components/ui.jsx';
-import Login from './pages/Login.jsx';
+import { Profile, Settings } from '@deem/shared';
+import { api } from './api';
+import { Kicker } from './components/ui';
+import Login from './pages/Login';
 
-const ProfileCtx = createContext(null);
+const ProfileCtx = createContext<Profile | null>(null);
 export const useProfile = () => useContext(ProfileCtx);
 
-function WorkspaceSettings({ onClose }) {
-  const [form, setForm] = useState({ telegramToken: '', defaultTokenBudget: 500000, maxConcurrentRuns: 2, phaseTimeoutMinutes: 30 });
-  const [current, setCurrent] = useState(null);
+interface SettingsForm {
+  telegramToken: string;
+  defaultTokenBudget: number | string;
+  maxConcurrentRuns: number | string;
+  phaseTimeoutMinutes: number | string;
+}
+
+function WorkspaceSettings({ onClose }: { onClose: () => void }) {
+  const [form, setForm] = useState<SettingsForm>({ telegramToken: '', defaultTokenBudget: 500000, maxConcurrentRuns: 2, phaseTimeoutMinutes: 30 });
+  const [current, setCurrent] = useState<Settings | null>(null);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    api.get('/api/settings').then((s) => {
+    api.get<Settings>('/api/settings').then((s) => {
       setCurrent(s);
       setForm((f) => ({
         ...f,
@@ -24,9 +32,9 @@ function WorkspaceSettings({ onClose }) {
     });
   }, []);
 
-  const submit = async (e) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const patch = {
+    const patch: Partial<Settings> = {
       defaultTokenBudget: Number(form.defaultTokenBudget),
       maxConcurrentRuns: Number(form.maxConcurrentRuns),
       phaseTimeoutMinutes: Number(form.phaseTimeoutMinutes),
@@ -85,12 +93,12 @@ function WorkspaceSettings({ onClose }) {
 }
 
 export default function App() {
-  const [profile, setProfile] = useState(undefined); // undefined = loading
+  const [profile, setProfile] = useState<Profile | null | undefined>(undefined); // undefined = loading
   const [settings, setSettings] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
-    api.get('/api/profile').then(setProfile).catch(() => setProfile(null));
+    api.get<Profile>('/api/profile').then(setProfile).catch(() => setProfile(null));
   }, []);
 
   if (profile === undefined) return null;

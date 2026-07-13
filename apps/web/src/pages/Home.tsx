@@ -1,19 +1,28 @@
-import React, { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { api, fmtDate, useEvents } from '../api.js';
-import { Kicker, StatusBadge } from '../components/ui.jsx';
+import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { Agent, Dashboard, Project } from '@deem/shared';
+import { api, fmtDate, useEvents } from '../api';
+import { Kicker, StatusBadge } from '../components/ui';
 
-function NewProjectModal({ onClose, onCreated }) {
-  const [form, setForm] = useState({ name: '', description: '', repoPath: '', agent: 'mock', branch: 'main' });
-  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+interface NewProjectForm {
+  name: string;
+  description: string;
+  repoPath: string;
+  agent: Agent;
+  branch: string;
+}
+
+function NewProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: (p: Project) => void }) {
+  const [form, setForm] = useState<NewProjectForm>({ name: '', description: '', repoPath: '', agent: 'mock', branch: 'main' });
+  const set = (k: keyof Omit<NewProjectForm, 'agent'>) => (e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, [k]: e.target.value });
   const [err, setErr] = useState('');
 
-  const submit = async (e) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      onCreated(await api.post('/api/projects', form));
+      onCreated(await api.post<Project>('/api/projects', form));
     } catch (ex) {
-      setErr(ex.message);
+      setErr((ex as Error).message);
     }
   };
 
@@ -38,7 +47,7 @@ function NewProjectModal({ onClose, onCreated }) {
         <div className="grid2">
           <label className="field">
             <span className="lab">Agent</span>
-            <select className="text" value={form.agent} onChange={set('agent')}>
+            <select className="text" value={form.agent} onChange={(e) => setForm({ ...form, agent: e.target.value as Agent })}>
               <option value="mock">Mock runner (no API cost)</option>
               <option value="claude-code">Claude Code</option>
               <option value="codex">Codex</option>
@@ -60,14 +69,14 @@ function NewProjectModal({ onClose, onCreated }) {
 }
 
 export default function Home() {
-  const [dash, setDash] = useState(null);
-  const [projects, setProjects] = useState([]);
+  const [dash, setDash] = useState<Dashboard | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [modal, setModal] = useState(false);
   const navigate = useNavigate();
 
   const refresh = () => {
-    api.get('/api/dashboard').then(setDash);
-    api.get('/api/projects').then(setProjects);
+    api.get<Dashboard>('/api/dashboard').then(setDash);
+    api.get<Project[]>('/api/projects').then(setProjects);
   };
   useEffect(refresh, []);
   useEvents(() => refresh(), []);
@@ -148,7 +157,7 @@ export default function Home() {
             </div>
             <div className="desc">{p.description}</div>
             <div className="meta" style={{ marginTop: 6 }}>
-              {p.taskCount} tasks · Created {fmtDate(p.createdAt)} · <StatusBadge status={p.health} />
+              {p.taskCount} tasks · Created {fmtDate(p.createdAt ?? 0)} · <StatusBadge status={p.health} />
             </div>
             {p.latestTask && (
               <div className="card inner" style={{ marginTop: 10, padding: '12px 16px' }}>

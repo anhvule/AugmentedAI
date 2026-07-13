@@ -1,17 +1,52 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { api, useEvents } from '../api.js';
-import { Kicker, StatusBadge } from '../components/ui.jsx';
+import { Project, Task } from '@deem/shared';
+import { api, useEvents } from '../api';
+import { Kicker, StatusBadge } from '../components/ui';
+
+interface ProcessInfo {
+  pid?: number;
+  command?: string;
+  cpu?: string;
+  up?: string;
+  idle?: string;
+  memMb?: number;
+  alive?: boolean;
+  cwd?: string;
+}
+
+interface ActivityInfo {
+  process?: ProcessInfo;
+  tools?: Record<string, number>;
+  totalToolCalls?: number;
+  transcriptLines?: number;
+  lastTool?: string;
+  sessionId?: string;
+  sessionFile?: string;
+}
+
+interface TaskLogData {
+  task: Task;
+  project: Project;
+  activity: ActivityInfo | null;
+}
+
+interface LogLine {
+  ts: number;
+  level: string;
+  source: string;
+  message: string;
+}
 
 export default function TaskLog() {
-  const { taskId } = useParams();
-  const [data, setData] = useState(null);
-  const [logs, setLogs] = useState([]);
-  const logEnd = useRef(null);
+  const { taskId } = useParams<{ taskId: string }>();
+  const [data, setData] = useState<TaskLogData | null>(null);
+  const [logs, setLogs] = useState<LogLine[]>([]);
+  const logEnd = useRef<HTMLDivElement | null>(null);
 
   const refresh = () => {
-    api.get(`/api/tasks/${taskId}`).then(setData).catch(() => {});
-    api.get(`/api/tasks/${taskId}/logs`).then(setLogs).catch(() => {});
+    api.get<TaskLogData>(`/api/tasks/${taskId}`).then(setData).catch(() => {});
+    api.get<LogLine[]>(`/api/tasks/${taskId}/logs`).then(setLogs).catch(() => {});
   };
   useEffect(refresh, [taskId]);
   useEvents((type, payload) => {
@@ -20,7 +55,7 @@ export default function TaskLog() {
     else if (type === 'activity') setData((d) => (d ? { ...d, activity: payload.activity } : d));
     else refresh();
   }, [taskId]);
-  useEffect(() => logEnd.current?.scrollIntoView({ behavior: 'smooth' }), [logs.length]);
+  useEffect(() => { logEnd.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs.length]);
 
   if (!data) return null;
   const { task, project, activity } = data;
@@ -35,7 +70,7 @@ export default function TaskLog() {
         <div className="row between">
           <div className="row">
             <h2 style={{ marginRight: 8 }}>{task.name}</h2>
-            <StatusBadge status={task.runStatus}>{task.runStatus.toUpperCase()}</StatusBadge>
+            <StatusBadge status={task.runStatus}>{(task.runStatus ?? '').toUpperCase()}</StatusBadge>
           </div>
           <div className="row">
             <Link className="pill" to={`/tasks/${taskId}`}>Back to Task</Link>

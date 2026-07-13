@@ -1,17 +1,35 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, fmtDate, useEvents } from '../api.js';
-import { Kicker, StatusBadge } from '../components/ui.jsx';
+import { Agent, KnowledgeDoc, Project as ProjectType, Skill, Task } from '@deem/shared';
+import { api, fmtDate, useEvents } from '../api';
+import { Kicker, StatusBadge } from '../components/ui';
 
 const FILTERS = ['all', 'pending', 'planned', 'implemented', 'reviewed', 'test_planned', 'tested', 'done', 'failed', 'archived'];
 
-function NewTaskModal({ projectId, onClose, onCreated }) {
-  const [form, setForm] = useState({ name: '', description: '', requirements: '', notes: '', status: 'pending' });
-  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+interface NewTaskForm {
+  name: string;
+  description: string;
+  requirements: string;
+  notes: string;
+  status: string;
+}
+
+function NewTaskModal({
+  projectId,
+  onClose,
+  onCreated,
+}: {
+  projectId: string;
+  onClose: () => void;
+  onCreated: (t: Task) => void;
+}) {
+  const [form, setForm] = useState<NewTaskForm>({ name: '', description: '', requirements: '', notes: '', status: 'pending' });
+  const set = (k: keyof NewTaskForm) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
+    setForm({ ...form, [k]: e.target.value });
   const [preview, setPreview] = useState(false);
 
   const submit = async () => {
-    const t = await api.post(`/api/projects/${projectId}/tasks`, form);
+    const t = await api.post<Task>(`/api/projects/${projectId}/tasks`, form);
     onCreated(t);
   };
 
@@ -79,22 +97,42 @@ function NewTaskModal({ projectId, onClose, onCreated }) {
   );
 }
 
-function SettingsModal({ project, onClose, onSaved, refresh }) {
-  const [tab, setTab] = useState('general');
-  const [form, setForm] = useState({
+interface ProjectSettingsForm {
+  name: string;
+  description: string;
+  repoPath: string;
+  agent: Agent;
+  branch: string;
+  permissionMode: string;
+}
+
+function SettingsModal({
+  project,
+  onClose,
+  onSaved,
+  refresh,
+}: {
+  project: ProjectType;
+  onClose: () => void;
+  onSaved: (p: ProjectType) => void;
+  refresh: () => void;
+}) {
+  const [tab, setTab] = useState<'general' | 'skills' | 'knowledge'>('general');
+  const [form, setForm] = useState<ProjectSettingsForm>({
     name: project.name, description: project.description, repoPath: project.repoPath,
     agent: project.agent, branch: project.branch, permissionMode: project.permissionMode || 'restricted',
   });
-  const [skill, setSkill] = useState({ name: '', instructions: '' });
-  const [doc, setDoc] = useState({ title: '', content: '' });
-  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const [skill, setSkill] = useState<Pick<Skill, 'name' | 'instructions'>>({ name: '', instructions: '' });
+  const [doc, setDoc] = useState<Pick<KnowledgeDoc, 'title' | 'content'>>({ title: '', content: '' });
+  const set = (k: keyof Omit<ProjectSettingsForm, 'agent'>) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+    setForm({ ...form, [k]: e.target.value });
 
-  const submit = async (e) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    onSaved(await api.patch(`/api/projects/${project.id}`, form));
+    onSaved(await api.patch<ProjectType>(`/api/projects/${project.id}`, form));
   };
 
-  const addSkill = async (e) => {
+  const addSkill = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!skill.name.trim()) return;
     await api.post(`/api/projects/${project.id}/skills`, skill);
@@ -102,7 +140,7 @@ function SettingsModal({ project, onClose, onSaved, refresh }) {
     refresh();
   };
 
-  const addDoc = async (e) => {
+  const addDoc = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!doc.title.trim() || !doc.content.trim()) return;
     await api.post(`/api/projects/${project.id}/knowledge`, doc);
@@ -121,7 +159,11 @@ function SettingsModal({ project, onClose, onSaved, refresh }) {
           <button className="pill" onClick={onClose}>Close</button>
         </div>
         <div className="tabs">
-          {[['general', 'General'], ['skills', `Skills (${project.skills?.length || 0})`], ['knowledge', `Knowledge (${project.knowledge?.length || 0})`]].map(([key, label]) => (
+          {([
+            ['general', 'General'],
+            ['skills', `Skills (${project.skills?.length || 0})`],
+            ['knowledge', `Knowledge (${project.knowledge?.length || 0})`],
+          ] as const).map(([key, label]) => (
             <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>
           ))}
         </div>
@@ -136,7 +178,7 @@ function SettingsModal({ project, onClose, onSaved, refresh }) {
               <input className="text" value={form.repoPath} onChange={set('repoPath')} /></label>
             <div className="grid2">
               <label className="field"><span className="lab">Agent</span>
-                <select className="text" value={form.agent} onChange={set('agent')}>
+                <select className="text" value={form.agent} onChange={(e) => setForm({ ...form, agent: e.target.value as Agent })}>
                   <option value="mock">Mock runner (no API cost)</option>
                   <option value="claude-code">Claude Code</option>
                   <option value="codex">Codex</option>
@@ -219,14 +261,14 @@ function SettingsModal({ project, onClose, onSaved, refresh }) {
 }
 
 export default function Project() {
-  const { projectId } = useParams();
-  const [proj, setProj] = useState(null);
+  const { projectId } = useParams<{ projectId: string }>();
+  const [proj, setProj] = useState<ProjectType | null>(null);
   const [filter, setFilter] = useState('all');
   const [taskModal, setTaskModal] = useState(false);
   const [settings, setSettings] = useState(false);
   const navigate = useNavigate();
 
-  const refresh = () => api.get(`/api/projects/${projectId}`).then(setProj).catch(() => {});
+  const refresh = () => { api.get<ProjectType>(`/api/projects/${projectId}`).then(setProj).catch(() => {}); };
   useEffect(refresh, [projectId]);
   useEvents(() => refresh(), [projectId]);
 

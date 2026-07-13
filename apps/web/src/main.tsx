@@ -1,13 +1,12 @@
-import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import './styles.css';
-import App from './App.jsx';
-import Home from './pages/Home.jsx';
-import Project from './pages/Project.jsx';
-import TaskDetail from './pages/TaskDetail.jsx';
-import TaskLog from './pages/TaskLog.jsx';
-import Chat from './pages/Chat.jsx';
+import App from './App';
+import Home from './pages/Home';
+import Project from './pages/Project';
+import TaskDetail from './pages/TaskDetail';
+import TaskLog from './pages/TaskLog';
+import Chat from './pages/Chat';
 
 const router = createBrowserRouter([
   {
@@ -23,4 +22,4 @@ const router = createBrowserRouter([
   },
 ]);
 
-createRoot(document.getElementById('root')).render(<RouterProvider router={router} />);
+createRoot(document.getElementById('root')!).render(<RouterProvider router={router} />);
