@@ -20,7 +20,9 @@ function requestJson(baseUrl, method, path, body) {
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         if (res.statusCode >= 400) {
-          reject(new Error(`deemsvc ${method} ${path} -> ${res.statusCode}: ${data}`));
+          const err = new Error(`deemsvc ${method} ${path} -> ${res.statusCode}: ${data}`);
+          err.statusCode = res.statusCode;
+          reject(err);
           return;
         }
         try {

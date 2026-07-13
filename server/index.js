@@ -294,6 +294,15 @@ app.post('/api/tasks/:id/accept-plan', (req, res) => {
   }
 });
 
+// Starts (or re-attaches to) a deemsvc SSE stream for a run and projects each
+// journal record onto the task's execution state. Shared by the initial run
+// route and the resume route — a resumed run's Python-side SSE generator only
+// re-opens once the orchestrator restarts, so resume must re-attach exactly
+// the same way the initial run did or the UI never sees the outcome.
+function attachDeemsvcStream(taskId, runId) {
+  streamEvents(deemsvc.baseUrl, runId, (record) => projectEvent(taskId, record));
+}
+
 app.post('/api/tasks/:id/run-deemsvc', async (req, res) => {
   if (!deemsvc) return res.status(503).json({ error: 'deemsvc is not running' });
   const t = findTask(req.params.id);
@@ -303,28 +312,44 @@ app.post('/api/tasks/:id/run-deemsvc', async (req, res) => {
     return res.status(400).json({ error: `project agent "${p.agent}" is not a deemsvc backend` });
   }
 
-  const { run_id } = await startRun(deemsvc.baseUrl, {
-    goal: t.description,
-    acceptance_criteria: t.requirements || [],
-    baseline_ref: req.body.baselineRef,
-    worktree: req.body.worktreePath,
-    token_ceiling: state().settings.defaultTokenBudget,
-    max_attempts: 4,
-    agent: p.agent,
-  });
+  try {
+    const { run_id } = await startRun(deemsvc.baseUrl, {
+      goal: t.description,
+      acceptance_criteria: t.requirements || [],
+      baseline_ref: req.body.baselineRef,
+      worktree: req.body.worktreePath,
+      token_ceiling: state().settings.defaultTokenBudget,
+      max_attempts: 4,
+      agent: p.agent,
+    });
 
-  streamEvents(deemsvc.baseUrl, run_id, (record) => projectEvent(t.id, record));
-  res.json({ runId: run_id });
+    attachDeemsvcStream(t.id, run_id);
+    res.json({ runId: run_id });
+  } catch (err) {
+    res.status(err.statusCode || 502).json({ error: err.message });
+  }
 });
 
 app.get('/api/tasks/:id/deemsvc-state/:runId', async (req, res) => {
   if (!deemsvc) return res.status(503).json({ error: 'deemsvc is not running' });
-  res.json(await getState(deemsvc.baseUrl, req.params.runId));
+  try {
+    res.json(await getState(deemsvc.baseUrl, req.params.runId));
+  } catch (err) {
+    res.status(err.statusCode || 502).json({ error: err.message });
+  }
 });
 
 app.post('/api/tasks/:id/deemsvc-resume/:runId', async (req, res) => {
   if (!deemsvc) return res.status(503).json({ error: 'deemsvc is not running' });
-  res.json(await resumeStep(deemsvc.baseUrl, req.params.runId, req.body.stepId));
+  const t = findTask(req.params.id);
+  if (!t) return res.status(404).json({ error: 'task not found' });
+  try {
+    const result = await resumeStep(deemsvc.baseUrl, req.params.runId, req.body.stepId);
+    attachDeemsvcStream(t.id, req.params.runId);
+    res.json(result);
+  } catch (err) {
+    res.status(err.statusCode || 502).json({ error: err.message });
+  }
 });
 
 app.get('/api/tasks/:id/logs', (req, res) => {
