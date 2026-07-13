@@ -362,7 +362,9 @@ app.delete('/api/projects/:id/knowledge/:docId', (req, res) => {
 app.get('/api/events', sseHandler);
 
 // ---------- static (production build) ----------
-const dist = path.join(__dirname, '..', 'dist');
+// In production the api serves apps/web's Vite build. DEEM_WEB_DIST lets
+// deploys/e2e override the location; default is the Nx output dir.
+const dist = process.env.DEEM_WEB_DIST || path.join(__dirname, '..', '..', '..', 'dist', 'apps', 'web');
 if (fs.existsSync(dist)) {
   app.use(express.static(dist));
   app.get(/^(?!\/api).*/, (req, res) => res.sendFile(path.join(dist, 'index.html')));

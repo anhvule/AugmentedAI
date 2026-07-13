@@ -5,7 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const AUDIT_FILE = path.join(__dirname, '..', 'data', 'audit.log');
+// DEEM_DATA_DIR wins (matches store.js); default points at the repo-root data/ dir.
+const AUDIT_FILE = path.join(process.env.DEEM_DATA_DIR || path.join(__dirname, '..', '..', '..', 'data'), 'audit.log');
 
 export function audit(actor, action, detail = {}) {
   const line = JSON.stringify({ ts: new Date().toISOString(), actor: actor || 'system', action, ...detail });
