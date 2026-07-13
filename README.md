@@ -1,4 +1,4 @@
-# Deem — Desktop-first AI Engineering
+# Deem — AI Engineering
 
 Describe a task in plain English. Deem drives an AI coding agent through a
 standardized quality pipeline — **plan → execution → review → test plan →
@@ -15,9 +15,13 @@ trade-offs and the mistakes made along the way — in
 
 ```bash
 npm install
-npm run dev        # web on http://localhost:4500, API on :4501
-npm run app        # or: build + launch as an Electron desktop app
+npm run dev     # nx serves api (:4501) + web (:4500, proxying /api)
+npm run build   # builds web + api into dist/apps/*
+npm test        # api tests (node:test)
+npm run e2e     # browser Playwright e2e
 ```
+
+Deem is now a web application (the Electron desktop shell was removed).
 
 Open http://localhost:4500, create an account (email + password), then:
 
@@ -84,8 +88,6 @@ observe counts as fact:
   Default budget is configurable in Settings.
 - **Multi-user auth** — scrypt-hashed passwords, cookie sessions, per-user
   accounts sharing the workspace.
-- **Desktop app** — `npm run app` boots the API inside Electron and opens
-  Deem as a native window.
 
 ## Agents
 
@@ -97,25 +99,29 @@ observe counts as fact:
 
 Per-phase behaviour, retries and auto-run toggles are identical across
 agents — the pipeline is the product; the agent is a plug-in
-([server/agents](server/agents/)).
+([apps/api/src/agents](apps/api/src/agents/)).
 
 ## Architecture
 
+Nx monorepo, in place:
+
 ```
-web/      Vite + React UI (dashboard, project, task tabs, debug view)
-server/   Express API + SSE
-  workflow.js   phase state machine, evaluation, acceptance, retries
-  agents/       mock | claude-code | codex adapters
-  monitor.js    ps-based process stats + tool activity aggregation
-  exporters.js  Markdown renderers per phase
-  store.js      JSON persistence (data/deem.json)
+apps/web/          React + Vite + TS UI (dashboard, project, task tabs, debug view)
+apps/web-e2e/      Browser Playwright e2e suite (Nx target: e2e)
+apps/api/src/      Express API + SSE (JS, node:test)
+  workflow.js        phase state machine, evaluation, acceptance, retries
+  agents/            mock | claude-code | codex adapters
+  monitor.js         ps-based process stats + tool activity aggregation
+  exporters.js       Markdown renderers per phase
+  store.js           JSON persistence (data/deem.json)
+libs/shared/       @deem/shared — TypeScript API-contract types shared by web and web-e2e
 ```
 
-`npm test` runs the agent-determinism test suite. `npm run build` +
-`npm start` serves the built UI from the API server as a single process.
+`npm test` runs the api test suite (`nx test api`). `npm run build` builds
+web + api into `dist/apps/*`; `npm start` serves the built UI from the API
+server as a single process.
 
 ## Future ideas
 
-Distributable installers (electron-builder), vector-embedding retrieval for
-the knowledge base, per-user permissions/roles, more chat platforms (Slack,
-Discord) on the shared command engine.
+Vector-embedding retrieval for the knowledge base, per-user permissions/roles,
+more chat platforms (Slack, Discord) on the shared command engine.
