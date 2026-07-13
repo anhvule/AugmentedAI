@@ -17,7 +17,6 @@ deemsvc/src/*.egg-info/
 # Nx
 .nx/cache
 .nx/workspace-data
-dist
 
 vite.config.*.timestamp*
 

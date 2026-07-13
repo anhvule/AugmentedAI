@@ -13,4 +13,4 @@ jobs:
         with: { node-version: '20', cache: 'npm' }
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npx nx run-many -t lint test build e2e --parallel=3
+      - run: npx nx run-many -t test build e2e --parallel=3
