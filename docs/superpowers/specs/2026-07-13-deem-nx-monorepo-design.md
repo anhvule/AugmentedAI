@@ -7,9 +7,10 @@
 ## 1. Goal
 
 Convert Deem from its current ad-hoc multi-folder layout into an **Nx monorepo**,
-**remove Electron entirely** (Deem becomes a pure web app), **migrate the
-JavaScript/JSX source to TypeScript**, and provide a **browser-based Playwright
-e2e** project. The Python `deemsvc` stays as a sibling outside the Nx graph.
+**remove Electron entirely** (Deem becomes a pure web app), **migrate the React
+frontend to TypeScript** (the ~1,800-LOC dynamic Express backend **stays
+JavaScript** — lowest-risk), and provide a **browser-based Playwright e2e**
+project. The Python `deemsvc` stays as a sibling outside the Nx graph.
 
 ## 2. Current state (baseline)
 
@@ -32,12 +33,12 @@ e2e** project. The Python `deemsvc` stays as a sibling outside the Nx graph.
 |----------|--------|
 | Workspace | Nx (latest), npm, **initialized in place** to preserve git history, `deemsvc`, `docs` |
 | Electron | **Removed completely** — shell, `electron` devDep, `app` script, e2e Electron harness |
-| Language | **Migrate JS/JSX → TS/TSX** across web + api |
+| Language | **`apps/web` + `libs/shared`: TypeScript**; **`apps/api` stays JavaScript** (`@nx/node` supports JS) |
 | Web bundler | **Vite** (keep current), via `@nx/vite` |
-| API | `@nx/node` (esbuild), Express |
+| API | `@nx/node`, Express, **JS** (relocated, not rewritten) |
 | E2E | `@nx/playwright`, **browser** (Chromium) — retire the Electron suite |
-| Shared code | `libs/shared` (`@deem/shared`) for the web/api API-contract types |
-| API tests | Migrate `node:test` → **Vitest** under `apps/api` (single Nx test runner) |
+| Shared code | `libs/shared` (`@deem/shared`) — strict TS API-contract types, consumed by `apps/web` |
+| API tests | **Keep `node:test`**; run via a custom `nx test api` target (no rewrite) |
 | Prod topology | **api serves the built web** (`dist/apps/web`) + `/api` — same single-service model as today |
 
 ## 4. Target layout
@@ -52,9 +53,10 @@ e2e** project. The Python `deemsvc` stays as a sibling outside the Nx graph.
       index.html
       src/ main.tsx, app/, pages/*.tsx, components/, api.ts, styles.css
       vite.config.ts, tsconfig*.json, project.json
-    api/                      # Express + TS           (from server/)
-      src/ main.ts, app.ts, store.ts, auth.ts, routes/…, *.spec.ts (vitest)
-      tsconfig*.json, project.json
+    api/                      # Express + JS (ESM)     (from server/, unchanged logic)
+      src/ index.js, store.js, auth.js, …, tests/*.test.js (node:test)
+      project.json            # serve/build/test targets wrap node
+      jsconfig.json           # editor types only; NOT type-checked
     web-e2e/                  # Playwright browser e2e (replaces tests/e2e)
       src/ specs/, pages/ (reused POMs, TS), fixtures/temp-repo.ts
       playwright.config.ts, project.json
@@ -73,21 +75,23 @@ Removed: `electron/`, root `dist/` (Nx emits to `dist/apps/*`), `tests/e2e/`
 
 - **apps/web** — React SPA. `api.ts` calls `/api/*`. Dev: Vite dev server on one
   port with a **proxy** for `/api` → the api port. Build → `dist/apps/web`.
-- **apps/api** — Express. In dev, `nx serve api` runs a watch build on port
-  `4501`. In prod, `nx build api` bundles to `dist/apps/api`; the server serves
-  `dist/apps/web` statically (SPA fallback) plus `/api/*` — mirroring the
-  current `server/index.js` static block. The `DEEM_DATA_DIR` env override is
-  preserved (used by e2e isolation).
-- **libs/shared** — TypeScript interfaces for the request/response payloads that
-  both web and api use (projects, tasks, settings, profile). Imported as
-  `@deem/shared`. This is where the TS migration earns its keep.
+- **apps/api** — Express, **JavaScript, logic unchanged**. `nx serve api` runs
+  `node src/index.js` (watch via `--watch`) on port `4501`. In prod the api
+  serves `apps/web`'s build statically (SPA fallback) plus `/api/*` — the same
+  static block as today, with the served path updated from `../dist` to the
+  web build output. The `DEEM_PORT` / `DEEM_DATA_DIR` env overrides are
+  preserved (the latter used by e2e isolation).
+- **libs/shared** — strict **TypeScript** interfaces for the request/response
+  payloads (projects, tasks, settings, profile), imported by `apps/web` as
+  `@deem/shared`. The JS api does not import them (it just returns the shapes);
+  this is a frontend-facing contract. This is where TS earns its keep.
 
 ## 6. Dev / build / task orchestration
 
 - `nx serve web` + `nx serve api` (or `nx run-many -t serve`) for local dev;
   root `npm run dev` delegates to `nx run-many -t serve`.
 - `nx build web && nx build api` for production; root `npm run build` delegates.
-- `nx test api` (vitest), `nx e2e web-e2e` (playwright), `nx lint` per project.
+- `nx test api` (wraps `node --test`), `nx e2e web-e2e` (playwright), `nx lint` on TS projects.
 - Nx caching + project graph come for free; CI can `nx affected -t lint test build`.
 
 ## 7. E2E (browser Playwright)
@@ -114,10 +118,11 @@ The plan will phase the work so each step stays independently testable:
 
 1. **Scaffold Nx** in place (nx.json, tsconfig.base.json, plugins) — repo still builds.
 2. **libs/shared** — extract API-contract types.
-3. **apps/api** — move `server/` → TS, wire `@nx/node`, migrate tests to Vitest,
-   keep prod static-serve of the web build. `nx test api` green.
-4. **apps/web** — move `web/` → TS/TSX, wire `@nx/vite`, `/api` dev proxy.
-   `nx build web` + `nx serve web` work against the api.
+3. **apps/api** — relocate `server/` as-is (JS), wire `@nx/node` serve/build
+   targets + an `nx test api` target wrapping `node --test`, update the static
+   path to the web build. `nx test api` green; `nx serve api` boots.
+4. **apps/web** — move `web/` → TS/TSX, wire `@nx/vite`, `/api` dev proxy,
+   consume `@deem/shared`. `nx build web` + `nx serve web` work against the api.
 5. **apps/web-e2e** — browser Playwright, port the POMs + flows. `nx e2e web-e2e` green.
 6. **Remove Electron** — delete `electron/`, the `electron` devDep, the old
    `tests/e2e/` harness, and dead root scripts; update docs to "web-only".
@@ -127,9 +132,10 @@ The plan will phase the work so each step stays independently testable:
 
 - **Invasive imports:** every import path changes; do it per-project with a green
   build gate at each phase.
-- **TS surfacing errors:** ~20 files gain types; expect a type-fixing pass. Start
-  `strict` but allow targeted `// TODO(types)` only where a payload shape is
-  genuinely dynamic, tracked in the shared lib.
+- **TS surfacing errors:** only the ~10 web files + `libs/shared` gain types
+  (api stays JS, so no backend type-fixing). `apps/web` runs `strict`; where a
+  server payload is genuinely dynamic, type it in `@deem/shared` rather than
+  scatter `any`.
 - **Prod parity:** the api-serves-web static block must reproduce today's
   behavior (SPA fallback for non-`/api` routes). Verified against
   `server/index.js`'s existing static section.
