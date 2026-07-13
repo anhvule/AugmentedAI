@@ -182,6 +182,9 @@ function SettingsModal({
                   <option value="mock">Mock runner (no API cost)</option>
                   <option value="claude-code">Claude Code</option>
                   <option value="codex">Codex</option>
+                  <option value="fable5-native">Fable 5 (native)</option>
+                  <option value="claude-code-cli">Claude Code (deemsvc)</option>
+                  <option value="codex-cli">Codex (deemsvc)</option>
                 </select></label>
               <label className="field"><span className="lab">Default branch</span>
                 <input className="text" value={form.branch} onChange={set('branch')} /></label>

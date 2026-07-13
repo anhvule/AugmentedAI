@@ -20,7 +20,15 @@ export const AGENT_LABELS = {
   mock: 'MOCK RUNNER',
   'claude-code': 'CLAUDE CODE',
   codex: 'CODEX',
+  'fable5-native': 'FABLE 5 (NATIVE)',
+  'claude-code-cli': 'CLAUDE CODE (DEEMSVC)',
+  'codex-cli': 'CODEX (DEEMSVC)',
 };
+
+// Every value the "Fable 5 (native)" project setting can take routes through
+// deemsvc's POST /runs `agent` field unchanged — see server/index.js's
+// /api/tasks/:id/run-deemsvc route.
+export const DEEMSVC_AGENTS = new Set(['fable5-native', 'claude-code-cli', 'codex-cli']);
 
 // Best-effort extraction of a JSON object from model output.
 export function parseJsonLoose(text) {

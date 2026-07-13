@@ -192,6 +192,13 @@ class Orchestrator:
             step.attempts += 1
             return await self._dispatch(step)
 
+    def resume_step(self, step: Step) -> None:
+        """The single re-entry point after an ESCALATED step is resolved by a
+        human or an orchestrator-level replan (blueprint §7.2: ESCALATED -> READY
+        is the only legal escape from escalation other than ABANDONED)."""
+        step.attempts = 0
+        self._transition(step, StepStatus.READY)
+
     async def run(self, graph: dict[str, Step]) -> dict[str, Step]:
         inflight: dict[asyncio.Task[StepResult], Step] = {}
         while True:

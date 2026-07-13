@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
+from collections import Counter
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from deemsvc.orchestrator.journal import JsonlJournal
-from deemsvc.orchestrator.state import Intent, Orchestrator, Step, TokenBudget
+from deemsvc.orchestrator.state import Intent, Orchestrator, Step, StepStatus, TokenBudget
 
 from .registry import RunRegistry
 
@@ -29,6 +32,10 @@ class StartRunRequest(BaseModel):
     token_ceiling: int = 500_000
     max_attempts: int = 4
     agent: str = "fable5-native"    # any name in deemsvc.sdk.registry.ADAPTER_FACTORIES
+
+
+class ResumeRequest(BaseModel):
+    step_id: str
 
 
 def _default_dispatcher_factory(intent: Intent, budget: TokenBudget, agent_name: str):
@@ -69,7 +76,7 @@ async def start_run(req: StartRunRequest) -> dict:
 
     journal_path = os.path.join(app.state.data_dir, run_id, "journal.jsonl")
     journal = JsonlJournal(journal_path)
-    entry = app.state.registry.create(run_id, graph, journal, agent=req.agent)
+    entry = app.state.registry.create(run_id, graph, journal, intent, budget, agent=req.agent)
 
     def journal_and_publish(record: dict) -> None:
         journal.append(record)
@@ -79,3 +86,130 @@ async def start_run(req: StartRunRequest) -> dict:
     orchestrator = Orchestrator(intent, budget, dispatch, journal_and_publish)
     entry.task = asyncio.create_task(orchestrator.run(graph))
     return {"run_id": run_id}
+
+
+@app.get("/runs/{run_id}/events")
+async def stream_events(run_id: str) -> StreamingResponse:
+    entry = app.state.registry.get(run_id)
+    if entry is None:
+        raise HTTPException(404, "unknown run_id")
+
+    async def gen():
+        # Subscribe BEFORE replaying the on-disk journal. The generator yields
+        # control back to the event loop on every `yield` (the ASGI layer
+        # flushes each chunk), so if we replayed the file first and only
+        # subscribed afterwards, a record — including the terminal
+        # passed/abandoned/escalated one — could be journaled+published in
+        # that gap and be missed entirely: not on disk in time for replay,
+        # and not delivered live because we weren't subscribed yet. By
+        # subscribing first, any record published during replay is already
+        # queued for us; we just need to de-dup it against what we replay
+        # from disk, since the producer journals a record to disk *before*
+        # publishing it (see journal_and_publish in start_run), so the same
+        # record can land in both places.
+        queue = app.state.registry.subscribe(run_id)
+        try:
+            replayed_counts: Counter[str] = Counter()
+
+            def format_if_new(record: dict) -> str | None:
+                """De-dup `record` against what replay already sent from disk and
+                return its SSE line, or None if it's a duplicate to skip.
+
+                Shared by the drain loop and the live loop below. In practice only
+                the drain loop can ever find a match: `subscribe()` runs before any
+                `await` in this generator, and `queue.get_nowait()` in the drain
+                loop never yields control either, so nothing can land on the queue
+                between subscribing and the drain loop finishing — every record
+                that could overlap with the on-disk replay is already queued and
+                resolved by the time the live loop's first `await queue.get()`
+                runs. The live loop keeps the same check anyway (rather than
+                trusting that invariant) so a single overlap check covers both call
+                sites and neither loop silently double-sends if the timing
+                assumption above is ever violated by a future change.
+                """
+                serialized = json.dumps(record, sort_keys=True, default=str)
+                if replayed_counts[serialized] > 0:
+                    replayed_counts[serialized] -= 1
+                    return None
+                return f"data: {serialized}\n\n"
+
+            with open(entry.journal.path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        replayed_counts[line] += 1
+                        yield f"data: {line}\n\n"
+
+            # Drain anything that raced onto the queue while we were reading
+            # the file, de-duping against what we just replayed from disk.
+            while True:
+                try:
+                    record = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                line_out = format_if_new(record)
+                if line_out is not None:
+                    yield line_out
+
+            if entry.task is not None and entry.task.done():
+                return  # producer finished; nothing more will ever be published
+
+            while True:
+                record = await queue.get()
+                line_out = format_if_new(record)
+                if line_out is not None:
+                    yield line_out
+                    if record.get("to") in ("passed", "abandoned", "escalated") and (
+                        entry.task is not None and entry.task.done()
+                    ):
+                        break
+        finally:
+            app.state.registry.unsubscribe(run_id, queue)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/runs/{run_id}/state")
+async def get_state(run_id: str) -> dict:
+    entry = app.state.registry.get(run_id)
+    if entry is None:
+        raise HTTPException(404, "unknown run_id")
+    return {
+        "run_id": run_id,
+        "done": entry.task.done() if entry.task else False,
+        "steps": {sid: {"status": s.status.value, "attempts": s.attempts}
+                 for sid, s in entry.graph.items()},
+    }
+
+
+@app.post("/runs/{run_id}/resume")
+async def resume_run(run_id: str, req: ResumeRequest) -> dict:
+    entry = app.state.registry.get(run_id)
+    if entry is None:
+        raise HTTPException(404, "unknown run_id")
+    step = entry.graph.get(req.step_id)
+    if step is None:
+        raise HTTPException(404, "unknown step_id")
+    if step.status is not StepStatus.ESCALATED:
+        raise HTTPException(409, f"step is {step.status}, not escalated")
+
+    # Reuse the Intent/TokenBudget the run was originally started with, rather
+    # than fabricating placeholders. Intent is pinned-at-run-start and must
+    # never drift across a resume. The budget object is reused as-is (not
+    # recreated) because it carries committed/reserved accounting from steps
+    # that already ran before the escalation — a fresh TokenBudget would reset
+    # that state and let the resumed run spend past the original ceiling.
+    intent = entry.intent
+    budget = entry.budget
+    # Reuse the same agent the run was started with — a resumed escalation
+    # shouldn't silently switch backends underneath the operator.
+    dispatch = app.state.dispatcher_factory(intent, budget, entry.agent)
+
+    def journal_and_publish(record: dict) -> None:
+        entry.journal.append(record)
+        app.state.registry.publish(run_id, record)
+
+    orchestrator = Orchestrator(intent, budget, dispatch, journal_and_publish)
+    orchestrator.resume_step(step)
+    entry.task = asyncio.create_task(orchestrator.run(entry.graph))
+    return {"resumed": req.step_id}

@@ -31,7 +31,20 @@ Per-project **permission mode**:
 - `full`: everything (`--dangerously-skip-permissions` /
   `--dangerously-bypass-approvals-and-sandbox`). Use only on throwaway repos.
 
-**4. Every claim is verified against ground truth** (see ARCHITECTURE §9):
+**4. deemsvc-backed agents run in a POSIX sandbox — macOS/Linux only.**
+Every deemsvc agent option (Fable 5 native, Claude Code (deemsvc), Codex (deemsvc))
+shares one tool broker that confines every tool invocation with `setrlimit` (CPU,
+memory, file descriptors, file size) and kills timed-out processes by process group
+(`SIGKILL` the whole group, not just the parent). This is enforced by the broker,
+not by agent instructions — a prompt cannot talk its way past it, and it applies
+uniformly whether the candidate came from the Anthropic API or a CLI subprocess. It
+does not run on Windows: the `resource` module `deemsvc` depends on is POSIX-only.
+Windows support is a known gap, not yet built; use the original Mock, Claude Code,
+or Codex options (not their "(deemsvc)" counterparts) on Windows until it lands. The
+"(deemsvc)" CLI options additionally require the `claude`/`codex` CLI installed and
+authenticated, same as their non-deemsvc counterparts — deemsvc doesn't bundle them.
+
+**5. Every claim is verified against ground truth** (see ARCHITECTURE §9):
 git diffs override agent-reported file lists; empty diff → automatic reject;
 tests are executed by the harness and judged by exit codes; reviews must cite
 evidence from the real diff.

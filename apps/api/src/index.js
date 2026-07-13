@@ -11,15 +11,26 @@ import {
 import { removeWorkspace } from './workspace.js';
 import { audit, auditTail } from './audit.js';
 import { exportMarkdown } from './exporters.js';
-import { AGENT_LABELS } from './agents/index.js';
+import { AGENT_LABELS, DEEMSVC_AGENTS } from './agents/index.js';
 import { register, verify, createSession, destroySession, sessionCookie, clearCookie, authMiddleware } from './auth.js';
 import { handleChatMessage, recordExchange } from './chat.js';
 import { syncTelegram } from './telegram.js';
+import { startDeemsvc } from './deemsvc-supervisor.js';
+import { startRun, streamEvents, getState, resumeStep } from './deemsvc-client.js';
+import { projectEvent } from './deemsvc-projector.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use('/api', authMiddleware);
+
+let deemsvc = null;
+try {
+  deemsvc = await startDeemsvc({ port: 8731 });
+  console.log(`[deemsvc] ready at ${deemsvc.baseUrl}`);
+} catch (err) {
+  console.error(`[deemsvc] failed to start — deemsvc-backed agent options will error until this is fixed: ${err.message}`);
+}
 
 const state = () => db.get();
 const findTask = (id) => state().tasks.find((t) => t.id === id);
@@ -283,6 +294,64 @@ app.post('/api/tasks/:id/accept-plan', (req, res) => {
   }
 });
 
+// Starts (or re-attaches to) a deemsvc SSE stream for a run and projects each
+// journal record onto the task's execution state. Shared by the initial run
+// route and the resume route — a resumed run's Python-side SSE generator only
+// re-opens once the orchestrator restarts, so resume must re-attach exactly
+// the same way the initial run did or the UI never sees the outcome.
+function attachDeemsvcStream(taskId, runId) {
+  streamEvents(deemsvc.baseUrl, runId, (record) => projectEvent(taskId, record));
+}
+
+app.post('/api/tasks/:id/run-deemsvc', async (req, res) => {
+  if (!deemsvc) return res.status(503).json({ error: 'deemsvc is not running' });
+  const t = findTask(req.params.id);
+  if (!t) return res.status(404).json({ error: 'task not found' });
+  const p = findProject(t.projectId);
+  if (!DEEMSVC_AGENTS.has(p.agent)) {
+    return res.status(400).json({ error: `project agent "${p.agent}" is not a deemsvc backend` });
+  }
+
+  try {
+    const { run_id } = await startRun(deemsvc.baseUrl, {
+      goal: t.description,
+      acceptance_criteria: t.requirements || [],
+      baseline_ref: req.body.baselineRef,
+      worktree: req.body.worktreePath,
+      token_ceiling: state().settings.defaultTokenBudget,
+      max_attempts: 4,
+      agent: p.agent,
+    });
+
+    attachDeemsvcStream(t.id, run_id);
+    res.json({ runId: run_id });
+  } catch (err) {
+    res.status(err.statusCode || 502).json({ error: err.message });
+  }
+});
+
+app.get('/api/tasks/:id/deemsvc-state/:runId', async (req, res) => {
+  if (!deemsvc) return res.status(503).json({ error: 'deemsvc is not running' });
+  try {
+    res.json(await getState(deemsvc.baseUrl, req.params.runId));
+  } catch (err) {
+    res.status(err.statusCode || 502).json({ error: err.message });
+  }
+});
+
+app.post('/api/tasks/:id/deemsvc-resume/:runId', async (req, res) => {
+  if (!deemsvc) return res.status(503).json({ error: 'deemsvc is not running' });
+  const t = findTask(req.params.id);
+  if (!t) return res.status(404).json({ error: 'task not found' });
+  try {
+    const result = await resumeStep(deemsvc.baseUrl, req.params.runId, req.body.stepId);
+    attachDeemsvcStream(t.id, req.params.runId);
+    res.json(result);
+  } catch (err) {
+    res.status(err.statusCode || 502).json({ error: err.message });
+  }
+});
+
 app.get('/api/tasks/:id/logs', (req, res) => {
   res.json(state().logs.filter((l) => l.taskId === req.params.id).slice(-500));
 });
@@ -387,6 +456,7 @@ function shutdownAndExit(signal) {
   shuttingDown = true;
   console.log(`[shutdown] ${signal} received — stopping agents and flushing state`);
   shutdown();
+  deemsvc?.stop();
   audit('system', 'server.stop', { signal });
   db.flushSync();
   process.exit(0);

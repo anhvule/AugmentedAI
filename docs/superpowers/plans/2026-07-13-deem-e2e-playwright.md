@@ -19,7 +19,7 @@
 - **Test root:** all new files live under `tests/e2e/`.
 - **Verified UI facts (copy verbatim into selectors):**
   - Window/document title: `Deem` (`web/index.html` `<title>Deem</title>`).
-  - Login tabs: buttons `Sign in`, `Create account`; register submit: `Create account & enter`; fields labelled `Name`, `Email`, `Password`.
+  - Login tabs: buttons `Sign in`, `Create account`; register submit: `Create account & enter`; fields labelled `Name`, `Email`, `Password`. **Password must be 8+ chars** (`server/auth.js`) — use `'secret123'` in tests.
   - Dashboard heading: `Operational Dashboard`; stat label text `Running now`.
   - New-project trigger: `Add New Project`; modal fields `Project name *`, `Description`, `Local repository path *`, select `Agent` (option `Mock runner (no API cost)`), `Default branch`; submit `Create project`. On success navigates to `/projects/:id`, which renders `<h2>{project.name}</h2>`.
   - New-task trigger: `+ New Task`; modal fields `Task name *`, `Description`, `Requirements`, `Notes`, select `Initial status`; submit `Create task`. On success navigates to `/tasks/:id`, which renders `<h2>{task.name}</h2>` plus `Export Task.md` button and `Back to Project` link.
@@ -400,7 +400,7 @@ test('Flow 2: create a project and a task', async ({ window, tmpRepo }) => {
   const home = new HomePage(window);
   const project = new ProjectPage(window);
 
-  await login.register('Aiko Sato', 'aiko@example.com', 'secret');
+  await login.register('Aiko Sato', 'aiko@example.com', 'secret123');
   await expect(home.dashboardHeading()).toBeVisible();
 
   // Create a project pointed at the isolated throwaway git repo.
@@ -499,7 +499,7 @@ test('Flow 3a: settings budget persists across reopen', async ({ window }) => {
   const shell = new AppShell(window);
   const settings = new SettingsModal(window);
 
-  await login.register('Aiko Sato', 'aiko@example.com', 'secret');
+  await login.register('Aiko Sato', 'aiko@example.com', 'secret123');
 
   await shell.openSettings();
   await expect(settings.heading()).toBeVisible();
@@ -522,7 +522,7 @@ test('Flow 3b: export opens a new Electron window at the export URL', async ({
   const home = new HomePage(window);
   const project = new ProjectPage(window);
 
-  await login.register('Aiko Sato', 'aiko@example.com', 'secret');
+  await login.register('Aiko Sato', 'aiko@example.com', 'secret123');
   await home.createProject({ name: 'Export Proj', repoPath: tmpRepo });
   await expect(project.heading('Export Proj')).toBeVisible();
   await project.createTask({ name: 'Exportable task' });
