@@ -444,7 +444,8 @@ if (fs.existsSync(dist)) {
 const recovered = recoverInterrupted();
 if (recovered) console.log(`[recovery] marked ${recovered} interrupted phase(s) as stopped`);
 
-const PORT = process.env.DEEM_PORT || 4501;
+// Render (and any PaaS) assigns $PORT; DEEM_PORT stays for local dev / e2e.
+const PORT = process.env.PORT || process.env.DEEM_PORT || 4501;
 app.listen(PORT, () => console.log(`Deem server listening on http://localhost:${PORT}`));
 syncTelegram();
 audit('system', 'server.start', { recovered });
