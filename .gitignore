@@ -20,3 +20,8 @@ deemsvc/src/*.egg-info/
 dist
 
 vite.config.*.timestamp*
+
+# Playwright (apps/web-e2e)
+test-results/
+playwright-report/
+blob-report/
