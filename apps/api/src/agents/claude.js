@@ -29,7 +29,9 @@ export const claudeAgent = {
         args.push('--dangerously-skip-permissions');
       }
 
-      const child = spawn('claude', args, { cwd: cwd || process.cwd(), env: process.env });
+      // CLAUDE_BIN lets ops point at an absolute path when `claude` isn't on the
+      // server process's PATH (e.g. launched from an IDE with a trimmed PATH).
+      const child = spawn(process.env.CLAUDE_BIN || 'claude', args, { cwd: cwd || process.cwd(), env: process.env });
       registerChild?.(child);
       let resultText = '';
       let stderr = '';
