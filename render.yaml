@@ -2,6 +2,10 @@ services:
   - type: web
     name: deem
     runtime: docker
+    plan: free   # free tier: no card required. NOTE: no persistent disk (data is
+                 # ephemeral — the JSON store resets on restart/redeploy) and the
+                 # service spins down after ~15 min idle. For persistence, switch
+                 # to a paid plan and re-add a `disk:` block mounted at /data.
     dockerfilePath: ./Dockerfile
     healthCheckPath: /api/health
     envVars:
@@ -11,7 +15,3 @@ services:
         value: /data
       - key: ANTHROPIC_API_KEY
         sync: false   # set in the Render dashboard; the mock agent works without it
-    disk:
-      name: deem-data
-      mountPath: /data
-      sizeGB: 1
