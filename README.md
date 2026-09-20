@@ -1,4 +1,4 @@
-# Deem — AI Engineering
+# AI Engineering
 
 Describe a task in plain English. Deem drives an AI coding agent through a
 standardized quality pipeline — **plan → execution → review → test plan →
